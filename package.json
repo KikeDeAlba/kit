@@ -1,6 +1,6 @@
 {
   "name": "@kikedealba/kit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Shared contract for the @kikedealba tools: installed-tool registry, JSON envelope, event bus, agent integrations and credential store.",
   "license": "MIT",
   "author": "Jesus Enrique De Alba Gaytan",

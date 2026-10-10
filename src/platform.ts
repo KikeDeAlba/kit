@@ -148,6 +148,15 @@ export async function openTarget(target: string, ctx: PlatformContext = platform
   })
 }
 
+export function withRuntimePath(env: NodeJS.ProcessEnv, runtime: string = process.execPath): NodeJS.ProcessEnv {
+  const key = pathKey(env)
+  const delimiter = process.platform === 'win32' ? ';' : ':'
+  const dir = path.dirname(runtime)
+  const current = (env[key] ?? '').split(delimiter).filter((entry) => entry.length > 0)
+  if (current.includes(dir)) return env
+  return { ...env, [key]: [dir, ...current].join(delimiter) }
+}
+
 export interface RunResult {
   stdout: string
   stderr: string
@@ -160,7 +169,7 @@ export async function run(
 ): Promise<RunResult> {
   if (options.input === undefined) {
     const { stdout, stderr } = await promisify(execFile)(command, [...args], {
-      env: options.env ?? process.env,
+      env: withRuntimePath(options.env ?? process.env),
       cwd: options.cwd,
       timeout: options.timeoutMs ?? 60_000,
       maxBuffer: 64 * 1024 * 1024,
@@ -171,7 +180,7 @@ export async function run(
   }
   return new Promise<RunResult>((resolve, reject) => {
     const child = spawn(command, [...args], {
-      env: options.env ?? process.env,
+      env: withRuntimePath(options.env ?? process.env),
       cwd: options.cwd,
       windowsHide: true,
       shell: needsShell(command),
