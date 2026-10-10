@@ -1,0 +1,52 @@
+{
+  "name": "@kikedealba/kit",
+  "version": "0.1.0",
+  "description": "Shared contract for the @kikedealba tools: installed-tool registry, JSON envelope, event bus, agent integrations and credential store.",
+  "license": "MIT",
+  "author": "Jesus Enrique De Alba Gaytan",
+  "homepage": "https://github.com/KikeDeAlba/kit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KikeDeAlba/kit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KikeDeAlba/kit/issues"
+  },
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./registry": "./dist/registry.js",
+    "./envelope": "./dist/envelope.js",
+    "./events": "./dist/events.js",
+    "./credentials": "./dist/credentials.js",
+    "./agents": "./dist/agents/index.js",
+    "./platform": "./dist/platform.js",
+    "./conformance": "./dist/conformance.js"
+  },
+  "bin": {
+    "kit": "./dist/bin/kit.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "kit": "node src/bin/kit.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.2"
+  }
+}
