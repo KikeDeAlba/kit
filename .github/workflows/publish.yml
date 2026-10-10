@@ -1,0 +1,49 @@
+name: publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: the tag and the manifest have to agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(jq -r .version package.json)"
+          if [ "$tag" != "$manifest" ]; then
+            echo "the release is $tag and package.json says $manifest" >&2
+            exit 1
+          fi
+
+      - run: pnpm typecheck
+
+      - run: pnpm test
+
+      - name: install the tarball the way a person would, and run it
+        run: |
+          tarball="$(npm pack --pack-destination "$RUNNER_TEMP" --silent | tail -1)"
+          npm install -g --prefix "$RUNNER_TEMP/prefix" "$RUNNER_TEMP/$tarball"
+          "$RUNNER_TEMP/prefix/bin/kit" capabilities --json
+
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
