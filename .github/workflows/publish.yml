@@ -43,6 +43,7 @@ jobs:
           tarball="$(npm pack --pack-destination "$RUNNER_TEMP" --silent | tail -1)"
           npm install -g --prefix "$RUNNER_TEMP/prefix" "$RUNNER_TEMP/$tarball"
           "$RUNNER_TEMP/prefix/bin/kit" capabilities --json
+          test -f "$RUNNER_TEMP/prefix/lib/node_modules/@kikedealba/kit/dist/index.d.ts"
 
       - run: npm publish --provenance --access public
         env:

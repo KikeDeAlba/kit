@@ -5,7 +5,7 @@
     "rewriteRelativeImportExtensions": true,
     "outDir": "dist",
     "rootDir": "src",
-    "declaration": false,
+    "declaration": true,
     "removeComments": false
   },
   "include": ["src"]
