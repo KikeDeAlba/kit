@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { test } from 'node:test'
 import {
@@ -11,6 +11,7 @@ import {
   manifestPath,
   registerTool,
   requireTool,
+  stableBin,
   ToolMissingError,
   unregisterTool,
   validateManifest,
@@ -83,4 +84,19 @@ test('conformance passes for a well-behaved tool and reports a broken one', asyn
   const mismatch = await checkConformance([process.execPath, good], { ...manifest, version: '9.9.9', capabilities: ['demo.fly'] }, sandbox(home))
   assert.ok(mismatch.problems.some((problem) => problem.includes('version differs')))
   assert.ok(mismatch.problems.some((problem) => problem.includes('demo.fly')))
+})
+
+test('stableBin prefers the command on PATH only when it is this same version', async (t) => {
+  const home = await tempDir(t)
+  const bin = path.join(home, 'bin')
+  await mkdir(bin)
+  const script = await fakeTool(home, 'demo-impl', CONFORMING_TOOL)
+  const shim = path.join(bin, process.platform === 'win32' ? 'demo.cmd' : 'demo')
+  await writeFile(shim, process.platform === 'win32' ? `@"${process.execPath}" "${script}" %*\r\n` : `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`)
+  await chmod(shim, 0o755)
+  const ctx = sandbox(home, { PATH: bin })
+  const fallback = [process.execPath, '/versioned/store/demo.js']
+  assert.deepEqual(await stableBin('demo', '1.2.3', fallback, ctx), [shim])
+  assert.deepEqual(await stableBin('demo', '9.9.9', fallback, ctx), fallback)
+  assert.deepEqual(await stableBin('missing-tool', '1.0.0', fallback, ctx), fallback)
 })

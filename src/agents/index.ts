@@ -197,12 +197,14 @@ async function installOpenCode(integration: AgentIntegration, homes: AgentHomes,
 
 async function editOpenCodeMcp(servers: readonly McpServer[], homes: AgentHomes, mode: 'install' | 'remove'): Promise<Step> {
   const item = `mcp ${servers.map((server) => server.name).join(', ')}`
-  if (existsSync(path.join(homes.opencode, 'opencode.jsonc'))) {
-    return { agent: 'opencode', item, state: 'unavailable', detail: 'opencode.jsonc is not edited automatically; add the MCP servers by hand' }
-  }
-  const file = path.join(homes.opencode, 'opencode.json')
+  const jsonc = path.join(homes.opencode, 'opencode.jsonc')
+  const file = existsSync(jsonc) ? jsonc : path.join(homes.opencode, 'opencode.json')
   const loaded = await readJsonFile(file)
-  if ('error' in loaded) return { agent: 'opencode', item, state: 'failed', detail: `${loaded.error}; left alone`, path: file }
+  if ('error' in loaded) {
+    return file === jsonc
+      ? { agent: 'opencode', item, state: 'unavailable', detail: `${file} has comments or is not plain JSON, so it is not edited automatically; add the MCP servers under "mcp" by hand`, path: file }
+      : { agent: 'opencode', item, state: 'failed', detail: `${loaded.error}; left alone`, path: file }
+  }
   const value = loaded.value
   const mcp = (typeof value['mcp'] === 'object' && value['mcp'] !== null ? { ...(value['mcp'] as Record<string, unknown>) } : {})
   for (const server of servers) {

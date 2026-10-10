@@ -192,3 +192,22 @@ test('detected mode only installs into agents that are present', async (t) => {
   assert.deepEqual([...new Set(steps.map((step) => step.agent))], ['gemini'])
   assert.ok(!existsSync(homes.claude))
 })
+
+test('opencode.jsonc is edited when it is plain JSON and left alone when it has comments', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const integration = await fixture(home)
+  const homes = { opencode: path.join(home, 'opencode') }
+  await mkdir(homes.opencode, { recursive: true })
+  const file = path.join(homes.opencode, 'opencode.jsonc')
+  await writeFile(file, JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { other: { type: 'remote', url: 'https://x' } } }))
+  const steps = await installIntegration(integration, { agents: ['opencode'], ctx, homes, locate: async () => null })
+  assert.ok(steps.some((step) => step.item.startsWith('mcp') && step.state === 'installed'))
+  const edited = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(edited.mcp.other.url, 'https://x')
+  assert.deepEqual(edited.mcp.demo.command, ['demo', 'mcp'])
+  await writeFile(file, '{\n  // mine\n  "mcp": {}\n}\n')
+  const again = await installIntegration(integration, { agents: ['opencode'], ctx, homes, locate: async () => null })
+  assert.ok(again.some((step) => step.item.startsWith('mcp') && step.state === 'unavailable'))
+  assert.match(await readFile(file, 'utf8'), /\/\/ mine/)
+})
