@@ -1,6 +1,6 @@
 {
   "name": "@kikedealba/kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared contract for the @kikedealba tools: installed-tool registry, JSON envelope, event bus, agent integrations and credential store.",
   "license": "MIT",
   "author": "Jesus Enrique De Alba Gaytan",
@@ -18,17 +18,41 @@
     "node": ">=24"
   },
   "exports": {
-    ".": "./dist/index.js",
-    "./registry": "./dist/registry.js",
-    "./envelope": "./dist/envelope.js",
-    "./events": "./dist/events.js",
-    "./credentials": "./dist/credentials.js",
-    "./agents": "./dist/agents/index.js",
-    "./platform": "./dist/platform.js",
-    "./conformance": "./dist/conformance.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./registry": {
+      "types": "./dist/registry.d.ts",
+      "default": "./dist/registry.js"
+    },
+    "./envelope": {
+      "types": "./dist/envelope.d.ts",
+      "default": "./dist/envelope.js"
+    },
+    "./events": {
+      "types": "./dist/events.d.ts",
+      "default": "./dist/events.js"
+    },
+    "./credentials": {
+      "types": "./dist/credentials.d.ts",
+      "default": "./dist/credentials.js"
+    },
+    "./agents": {
+      "types": "./dist/agents/index.d.ts",
+      "default": "./dist/agents/index.js"
+    },
+    "./platform": {
+      "types": "./dist/platform.d.ts",
+      "default": "./dist/platform.js"
+    },
+    "./conformance": {
+      "types": "./dist/conformance.d.ts",
+      "default": "./dist/conformance.js"
+    }
   },
   "bin": {
-    "kit": "./dist/bin/kit.js"
+    "kit": "dist/bin/kit.js"
   },
   "files": [
     "dist",
@@ -48,5 +72,6 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.7.2"
-  }
+  },
+  "types": "./dist/index.d.ts"
 }
