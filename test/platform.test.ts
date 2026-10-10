@@ -62,3 +62,12 @@ test('envelopes round-trip and the last envelope line wins', () => {
   assert.equal(parsed?.ok, true)
   assert.equal(parseEnvelope('not json'), null)
 })
+
+test('child processes get the running node on PATH', async () => {
+  const { withRuntimePath } = await import('../src/platform.ts')
+  const separator = process.platform === 'win32' ? ';' : ':'
+  const env = withRuntimePath({ PATH: ['/usr/bin', '/bin'].join(separator) }, path.join(path.sep, 'opt', 'node', 'bin', 'node'))
+  assert.equal(env['PATH']?.split(separator)[0], path.join(path.sep, 'opt', 'node', 'bin'))
+  const again = withRuntimePath(env, path.join(path.sep, 'opt', 'node', 'bin', 'node'))
+  assert.equal(again['PATH'], env['PATH'])
+})

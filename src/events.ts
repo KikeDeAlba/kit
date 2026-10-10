@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { appendFile, mkdir, open } from 'node:fs/promises'
 import path from 'node:path'
-import { platformContext, type PlatformContext } from './platform.ts'
+import { platformContext, withRuntimePath, type PlatformContext } from './platform.ts'
 import { isInstalled, listTools, type EventFilter } from './registry.ts'
 
 export const NO_EVENTS_ENV_VAR = 'KIT_NO_EVENTS'
@@ -135,7 +135,7 @@ async function launch(listener: Listener, occurrence: EventOccurrence, logPath: 
       const child = spawn(command, args, {
         detached: true,
         stdio: ['pipe', log.fd, log.fd],
-        env: { ...ctx.env, ...occurrence.env, KIT_EVENT: occurrence.event, KIT_EVENT_SOURCE: occurrence.tool },
+        env: withRuntimePath({ ...ctx.env, ...occurrence.env, KIT_EVENT: occurrence.event, KIT_EVENT_SOURCE: occurrence.tool }),
         cwd: neutralCwd(ctx),
         windowsHide: true,
         shell: ctx.platform === 'win32' && /\.(cmd|bat)$/i.test(command),
