@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { ENVELOPE_VERSION, parseEnvelope, type Envelope } from './envelope.ts'
-import { configHome, platformContext, run, type PlatformContext } from './platform.ts'
+import { configHome, platformContext, run, which, type PlatformContext } from './platform.ts'
 import { satisfiesMinimum } from './semver.ts'
 
 export const REGISTRY_ENV_VAR = 'KIT_REGISTRY_DIR'
@@ -281,4 +281,11 @@ export async function requireTool(name: string, hint: string, options: FindOptio
   if (found) return found
   const parts = [options.minVersion ? `>= ${options.minVersion}` : null, options.capability ? `with ${[options.capability].flat().join(', ')}` : null].filter(Boolean)
   throw new ToolMissingError(name, hint, parts.length > 0 ? parts.join(' ') : undefined)
+}
+
+export async function stableBin(name: string, version: string, fallback: readonly string[], ctx: PlatformContext = platformContext()): Promise<string[]> {
+  const onPath = await which(name, ctx)
+  if (!onPath) return [...fallback]
+  const live = await probeCapabilities([onPath], ctx)
+  return live !== null && live.name === name && live.version === version ? [onPath] : [...fallback]
 }
