@@ -210,7 +210,7 @@ test('removeLegacyClaude removes links into an older copy of the package', { ski
   await mkdir(old, { recursive: true })
   await mkdir(path.join(homes.claude, 'skills'), { recursive: true })
   await symlink(old, path.join(homes.claude, 'skills', 'demo'))
-  const elsewhere = path.join(home, 'someone', 'plain')
+  const elsewhere = path.join(home, 'dev', 'github.com', 'KikeDeAlba', 'demo', 'plain')
   await mkdir(elsewhere, { recursive: true })
   await symlink(elsewhere, path.join(homes.claude, 'skills', 'plain'))
   await removeLegacyClaude(integration, { ctx, homes, locate: async () => null, skipMcp: true })
@@ -273,7 +273,7 @@ test('opencode skips what claude-compat already relays from Claude Code', async 
   const forcedOn = await installIntegration(integration, { ...options, homes: { ...homes, claude: path.join(home, 'empty') }, claudeCompat: true })
   assert.deepEqual(
     forcedOn.filter((step) => step.state === 'skipped').map((step) => step.item),
-    ['command demo-start', 'command demo-go', 'plugin demo'],
+    ['command demo-start', 'plugin demo'],
   )
 })
 
