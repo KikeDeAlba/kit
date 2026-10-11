@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { dataHome, platformContext, run, which, type PlatformContext } from '../platform.ts'
 import {
@@ -13,12 +13,13 @@ import {
   tomlTableBlock,
   writeJsonFile,
 } from './files.ts'
-import { commandForCodex, commandToGeminiToml, hasAgentBlocks, renderForAgent } from './markdown.ts'
+import { commandForCodex, commandToGeminiToml, hasAgentBlocks, renderForAgent, skillToOpenCodeCommand } from './markdown.ts'
 import {
   AGENTS,
   type AgentHomes,
   type AgentIntegration,
   type AgentName,
+  type ClaudePluginSpec,
   type CommandSource,
   type InstallOptions,
   type McpServer,
@@ -27,7 +28,7 @@ import {
 } from './types.ts'
 
 export * from './types.ts'
-export { commandToGeminiToml, commandForCodex, renderForAgent, hasAgentBlocks, parseFrontmatter } from './markdown.ts'
+export { commandToGeminiToml, commandForCodex, renderForAgent, hasAgentBlocks, parseFrontmatter, skillToOpenCodeCommand } from './markdown.ts'
 export { mergeHooks, stripHooks } from './files.ts'
 
 const BINARIES: Record<AgentName, string> = { claude: 'claude', opencode: 'opencode', codex: 'codex', gemini: 'gemini' }
@@ -99,13 +100,24 @@ async function placeSkill(skill: SkillSource, destination: string, agent: AgentN
   }
 }
 
-async function placeMarkdownCommand(command: CommandSource, destination: string, agent: AgentName, integration: AgentIntegration, ctx: PlatformContext): Promise<Step> {
+interface MarkdownCommand extends CommandSource {
+  fromSkill: boolean
+}
+
+function markdownCommands(integration: AgentIntegration): MarkdownCommand[] {
+  return [
+    ...(integration.commands ?? []).map((command) => ({ ...command, fromSkill: false })),
+    ...(integration.userSkills ?? []).map((skill) => ({ name: skill.name, file: path.join(skill.dir, 'SKILL.md'), fromSkill: true })),
+  ]
+}
+
+async function placeMarkdownCommand(command: MarkdownCommand, destination: string, agent: AgentName, integration: AgentIntegration, ctx: PlatformContext): Promise<Step> {
   try {
     const text = await readFile(command.file, 'utf8')
-    if (hasAgentBlocks(text)) {
+    if (command.fromSkill || hasAgentBlocks(text)) {
       const rendered = path.join(renderedRoot(ctx, integration.tool, agent), 'commands', `${command.name}.md`)
       await mkdir(path.dirname(rendered), { recursive: true })
-      await writeFile(rendered, renderForAgent(text, agent))
+      await writeFile(rendered, command.fromSkill ? skillToOpenCodeCommand(text) : renderForAgent(text, agent))
       await linkPath(rendered, destination, ctx.platform)
       return { agent, item: `command ${command.name}`, state: 'installed', detail: `command ${command.name} rendered for ${agent}`, path: destination }
     }
@@ -116,15 +128,19 @@ async function placeMarkdownCommand(command: CommandSource, destination: string,
   }
 }
 
-async function defaultExec(command: string, args: readonly string[]): Promise<void> {
-  await run(command, args, { timeoutMs: 60_000 })
+async function defaultExec(command: string, args: readonly string[]): Promise<string> {
+  return (await run(command, args, { timeoutMs: 120_000 })).stdout
+}
+
+function locator(options: InstallOptions, ctx: PlatformContext): (command: string) => Promise<string | null> {
+  return options.locate ?? ((command: string) => which(command, ctx))
 }
 
 async function installClaude(integration: AgentIntegration, homes: AgentHomes, options: InstallOptions, ctx: PlatformContext): Promise<Step[]> {
   const steps: Step[] = []
   for (const skill of integration.skills ?? []) steps.push(await placeSkill(skill, path.join(homes.claude, 'skills', skill.name), 'claude', integration, ctx))
   for (const command of integration.commands ?? []) {
-    steps.push(await placeMarkdownCommand(command, path.join(homes.claude, 'commands', `${command.name}.md`), 'claude', integration, ctx))
+    steps.push(await placeMarkdownCommand({ ...command, fromSkill: false }, path.join(homes.claude, 'commands', `${command.name}.md`), 'claude', integration, ctx))
   }
   const settings = integration.claude
   if (settings && (settings.permissions || (settings.hooks && !options.skipHooks))) {
@@ -161,7 +177,7 @@ async function installClaude(integration: AgentIntegration, homes: AgentHomes, o
 }
 
 async function installClaudeMcp(server: McpServer, options: InstallOptions, ctx: PlatformContext): Promise<Step> {
-  const claude = await (options.locate ?? ((command: string) => which(command, ctx)))('claude')
+  const claude = await locator(options, ctx)('claude')
   const args = 'url' in server
     ? ['mcp', 'add', '--scope', 'user', '--transport', 'http', server.name, server.url, ...Object.entries(server.headers ?? {}).flatMap(([key, value]) => ['--header', `${key}: ${value}`])]
     : ['mcp', 'add', '--scope', 'user', ...Object.entries(server.env ?? {}).flatMap(([key, value]) => ['--env', `${key}=${value}`]), server.name, '--', ...server.command]
@@ -176,14 +192,76 @@ async function installClaudeMcp(server: McpServer, options: InstallOptions, ctx:
   }
 }
 
+async function findClaudeRelay(homes: AgentHomes): Promise<string | null> {
+  for (const folder of ['plugins', 'plugin']) {
+    const dir = path.join(homes.opencode, folder)
+    const entries = await readdir(dir).catch(() => [] as string[])
+    const relay = entries.find((entry) => /claude-compat/i.test(entry))
+    if (relay) return path.join(dir, relay)
+  }
+  for (const name of ['opencode.json', 'opencode.jsonc']) {
+    const file = path.join(homes.opencode, name)
+    const text = existsSync(file) ? await readFile(file, 'utf8').catch(() => '') : ''
+    if (/"plugin"\s*:\s*\[[^\]]*claude-compat/i.test(text)) return file
+  }
+  return null
+}
+
+async function claudeHooksPresent(integration: AgentIntegration, homes: AgentHomes): Promise<boolean> {
+  const wanted = integration.claude?.hooks
+  if (!wanted) return false
+  const loaded = await readJsonFile(path.join(homes.claude, 'settings.json'))
+  if ('error' in loaded || !loaded.existed) return false
+  return stripHooks(loaded.value['hooks'], wanted).removed > 0
+}
+
+interface RelayPlan {
+  relay: string
+  plugins: boolean
+  command: (command: MarkdownCommand) => boolean
+}
+
+async function planClaudeRelay(integration: AgentIntegration, homes: AgentHomes, options: InstallOptions): Promise<RelayPlan | null> {
+  const mode = options.claudeCompat ?? 'auto'
+  if (mode === false) return null
+  const relay = await findClaudeRelay(homes)
+  if (mode === true) return { relay: relay ?? 'claudeCompat', plugins: true, command: (command) => !command.fromSkill }
+  if (!relay) return null
+  return {
+    relay,
+    plugins: await claudeHooksPresent(integration, homes),
+    command: (command) => !command.fromSkill && existsSync(path.join(homes.claude, 'commands', `${command.name}.md`)),
+  }
+}
+
+async function skipRelayed(item: string, destination: string, source: string, relay: string, ctx: PlatformContext, integration: AgentIntegration): Promise<Step> {
+  const text = await readFile(source, 'utf8').catch(() => null)
+  const copies = text === null ? [] : [text, renderForAgent(text, 'opencode')]
+  const removed = await removeLegacyEntry(destination, [source], [renderedRoot(ctx, integration.tool, 'opencode')], copies)
+  return {
+    agent: 'opencode',
+    item,
+    state: 'skipped',
+    detail: `${relay} already relays it from Claude Code${removed ? '; removed the copy kit installed before' : ''}`,
+    path: destination,
+  }
+}
+
 async function installOpenCode(integration: AgentIntegration, homes: AgentHomes, options: InstallOptions, ctx: PlatformContext): Promise<Step[]> {
   const steps: Step[] = []
+  const relay = await planClaudeRelay(integration, homes, options)
   for (const skill of integration.skills ?? []) steps.push(await placeSkill(skill, path.join(homes.opencode, 'skills', skill.name), 'opencode', integration, ctx))
-  for (const command of integration.commands ?? []) {
-    steps.push(await placeMarkdownCommand(command, path.join(homes.opencode, 'commands', `${command.name}.md`), 'opencode', integration, ctx))
+  for (const command of markdownCommands(integration)) {
+    const destination = path.join(homes.opencode, 'commands', `${command.name}.md`)
+    if (relay?.command(command)) steps.push(await skipRelayed(`command ${command.name}`, destination, command.file, relay.relay, ctx, integration))
+    else steps.push(await placeMarkdownCommand(command, destination, 'opencode', integration, ctx))
   }
   for (const plugin of integration.opencode?.plugins ?? []) {
     const destination = path.join(homes.opencode, 'plugins', `${plugin.name}${path.extname(plugin.file)}`)
+    if (relay?.plugins) {
+      steps.push(await skipRelayed(`plugin ${plugin.name}`, destination, plugin.file, relay.relay, ctx, integration))
+      continue
+    }
     try {
       const state = await linkPath(plugin.file, destination, ctx.platform)
       steps.push({ agent: 'opencode', item: `plugin ${plugin.name}`, state, detail: `plugin ${plugin.name} linked`, path: destination })
@@ -221,7 +299,7 @@ async function editOpenCodeMcp(servers: readonly McpServer[], homes: AgentHomes,
 async function installCodex(integration: AgentIntegration, homes: AgentHomes, options: InstallOptions, ctx: PlatformContext): Promise<Step[]> {
   const steps: Step[] = []
   for (const skill of integration.skills ?? []) steps.push(await placeSkill(skill, path.join(homes.agentsSkills, skill.name), 'codex', integration, ctx))
-  for (const command of integration.commands ?? []) {
+  for (const command of markdownCommands(integration)) {
     const destination = path.join(homes.codex, 'prompts', `${command.name}.md`)
     try {
       await mkdir(path.dirname(destination), { recursive: true })
@@ -287,11 +365,12 @@ async function installGemini(integration: AgentIntegration, homes: AgentHomes, o
   const root = geminiExtensionDir(homes, integration.tool)
   await mkdir(root, { recursive: true })
   for (const skill of integration.skills ?? []) steps.push(await placeSkill(skill, path.join(root, 'skills', skill.name), 'gemini', integration, ctx))
-  if ((integration.commands ?? []).length > 0) {
+  const commands = markdownCommands(integration)
+  if (commands.length > 0) {
     const commandsDir = path.join(root, 'commands')
     await rm(commandsDir, { recursive: true, force: true })
     await mkdir(commandsDir, { recursive: true })
-    for (const command of integration.commands ?? []) {
+    for (const command of commands) {
       const destination = path.join(commandsDir, `${command.name}.toml`)
       try {
         await writeFile(destination, commandToGeminiToml(await readFile(command.file, 'utf8')))
@@ -376,7 +455,7 @@ export async function uninstallIntegration(integration: AgentIntegration, option
         const where = path.join(base, 'skills', skill.name)
         steps.push(removed(agent, `skill ${skill.name}`, await removeOwnedLink(where), where))
       }
-      for (const command of integration.commands ?? []) {
+      for (const command of agent === 'claude' ? integration.commands ?? [] : markdownCommands(integration)) {
         const where = path.join(base, 'commands', `${command.name}.md`)
         steps.push(removed(agent, `command ${command.name}`, await removeOwnedLink(where), where))
       }
@@ -385,15 +464,11 @@ export async function uninstallIntegration(integration: AgentIntegration, option
       const file = path.join(homes.claude, 'settings.json')
       const loaded = await readJsonFile(file)
       if (!('error' in loaded) && loaded.existed) {
-        const value = loaded.value
-        const permissions = value['permissions'] as Record<string, string[]> | undefined
-        const owned = new Set([...(integration.claude?.permissions?.allow ?? []), ...(integration.claude?.permissions?.ask ?? [])])
-        if (permissions) for (const key of ['allow', 'ask']) if (Array.isArray(permissions[key])) permissions[key] = permissions[key].filter((rule) => !owned.has(rule))
-        if (integration.claude?.hooks) value['hooks'] = stripHooks(value['hooks'], integration.claude.hooks).hooks
-        await writeJsonFile(file, value, true)
+        stripClaudeSettings(integration, loaded.value)
+        await writeJsonFile(file, loaded.value, true)
         steps.push({ agent, item: 'settings', state: 'removed', detail: `cleaned ${file}`, path: file })
       }
-      const claude = await (options.locate ?? ((command: string) => which(command, ctx)))('claude')
+      const claude = await locator(options, ctx)('claude')
       for (const server of integration.mcp ?? []) {
         if (!claude) continue
         const ok = await (options.exec ?? defaultExec)(claude, ['mcp', 'remove', '--scope', 'user', server.name]).then(() => true, () => false)
@@ -412,7 +487,7 @@ export async function uninstallIntegration(integration: AgentIntegration, option
         const where = path.join(homes.agentsSkills, skill.name)
         steps.push(removed(agent, `skill ${skill.name}`, await removeOwnedLink(where), where))
       }
-      for (const command of integration.commands ?? []) {
+      for (const command of markdownCommands(integration)) {
         const where = path.join(homes.codex, 'prompts', `${command.name}.md`)
         const ok = existsSync(where)
         await rm(where, { force: true })
@@ -436,6 +511,222 @@ export async function uninstallIntegration(integration: AgentIntegration, option
     }
   }
   for (const agent of AGENTS) await rm(renderedRoot(ctx, integration.tool, agent), { recursive: true, force: true })
+  return steps
+}
+
+function stripClaudeSettings(integration: AgentIntegration, value: Record<string, unknown>): number {
+  let removed = 0
+  const permissions = value['permissions'] as Record<string, unknown> | undefined
+  const owned = new Set([...(integration.claude?.permissions?.allow ?? []), ...(integration.claude?.permissions?.ask ?? [])])
+  if (permissions && typeof permissions === 'object') {
+    for (const key of ['allow', 'ask']) {
+      const current = permissions[key]
+      if (!Array.isArray(current)) continue
+      const kept = current.filter((rule) => !owned.has(rule as string))
+      removed += current.length - kept.length
+      permissions[key] = kept
+    }
+  }
+  if (integration.claude?.hooks && value['hooks'] !== undefined) {
+    const stripped = stripHooks(value['hooks'], integration.claude.hooks)
+    value['hooks'] = stripped.hooks
+    removed += stripped.removed
+  }
+  return removed
+}
+
+function isInside(target: string, root: string): boolean {
+  const relative = path.relative(path.resolve(root), target)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+function inToolPackage(target: string): boolean {
+  return target.split(/[\\/]/).some((segment) => segment === '@kikedealba' || segment.startsWith('@kikedealba+'))
+}
+
+async function removeLegacyEntry(where: string, owners: readonly string[], roots: readonly string[], copies: readonly string[] = []): Promise<boolean> {
+  const info = await lstat(where).catch(() => null)
+  if (!info) return false
+  let owned = false
+  if (info.isSymbolicLink()) {
+    const target = path.resolve(path.dirname(where), await readlink(where))
+    owned = owners.some((owner) => path.resolve(owner) === target) || roots.some((root) => isInside(target, root)) || inToolPackage(target)
+  } else if (info.isFile() && copies.length > 0) {
+    const text = await readFile(where, 'utf8').catch(() => null)
+    owned = text !== null && copies.includes(text)
+  }
+  if (owned) await rm(where, { recursive: true, force: true })
+  return owned
+}
+
+function errorText(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const extra = error as Error & { stdout?: unknown; stderr?: unknown }
+  return [error.message, extra.stderr, extra.stdout].filter((part) => typeof part === 'string').join('\n')
+}
+
+async function readJsonOutput(exec: NonNullable<InstallOptions['exec']>, claude: string, args: readonly string[]): Promise<unknown[] | null> {
+  try {
+    const output = await exec(claude, args)
+    if (typeof output !== 'string') return null
+    const parsed: unknown = JSON.parse(output)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function pluginId(spec: ClaudePluginSpec): string {
+  return `${spec.plugin}@${spec.marketplaceName}`
+}
+
+async function pluginInstalled(exec: NonNullable<InstallOptions['exec']>, claude: string, spec: ClaudePluginSpec): Promise<boolean | null> {
+  const listed = await readJsonOutput(exec, claude, ['plugin', 'list', '--json'])
+  if (!listed) return null
+  const scope = spec.scope ?? 'user'
+  return listed.some((entry) => {
+    const record = entry as { id?: unknown; scope?: unknown }
+    return record.id === pluginId(spec) && (record.scope === undefined || record.scope === scope)
+  })
+}
+
+export async function installClaudePlugin(spec: ClaudePluginSpec, options: InstallOptions = {}): Promise<Step[]> {
+  const ctx = options.ctx ?? platformContext()
+  const id = pluginId(spec)
+  const scope = spec.scope ?? 'user'
+  const scopeArgs = scope === 'user' ? [] : ['--scope', scope]
+  const marketplaceItem = `marketplace ${spec.marketplaceName}`
+  const item = `plugin ${id}`
+  const claude = await locator(options, ctx)('claude')
+  if (!claude) {
+    const manual = [
+      `claude plugin marketplace add ${spec.marketplace}${scopeArgs.length > 0 ? ` --scope ${scope}` : ''}`,
+      `claude plugin marketplace update ${spec.marketplaceName}`,
+      `claude plugin install ${id} --scope ${scope}`,
+    ]
+    return [{ agent: 'claude', item, state: 'unavailable', detail: `claude is not on PATH; run: ${manual.join(' && ')}` }]
+  }
+  const exec = options.exec ?? defaultExec
+  const steps: Step[] = []
+  const marketplaces = await readJsonOutput(exec, claude, ['plugin', 'marketplace', 'list', '--json'])
+  if (marketplaces?.some((entry) => (entry as { name?: unknown }).name === spec.marketplaceName)) {
+    steps.push({ agent: 'claude', item: marketplaceItem, state: 'present', detail: `marketplace ${spec.marketplaceName} already added` })
+  } else {
+    try {
+      await exec(claude, ['plugin', 'marketplace', 'add', spec.marketplace, ...scopeArgs])
+      steps.push({ agent: 'claude', item: marketplaceItem, state: 'installed', detail: `marketplace ${spec.marketplace} added` })
+    } catch (error) {
+      if (!/already/i.test(errorText(error))) {
+        steps.push({ agent: 'claude', item: marketplaceItem, state: 'failed', detail: `claude plugin marketplace add failed: ${reason(error)}` })
+        return steps
+      }
+      steps.push({ agent: 'claude', item: marketplaceItem, state: 'present', detail: `marketplace ${spec.marketplaceName} already added` })
+    }
+  }
+  let stale = ''
+  try {
+    await exec(claude, ['plugin', 'marketplace', 'update', spec.marketplaceName])
+  } catch (error) {
+    stale = ' from the cached catalog, which may be out of date'
+    steps.push({ agent: 'claude', item: marketplaceItem, state: 'failed', detail: `claude plugin marketplace update failed: ${reason(error)}` })
+  }
+  const update = (): Promise<unknown> => exec(claude, ['plugin', 'update', id, '--scope', scope])
+  const updated: Step = { agent: 'claude', item, state: 'installed', detail: `plugin ${id} updated${stale}; restart Claude Code to apply` }
+  const installed: Step = { agent: 'claude', item, state: 'installed', detail: `plugin ${id} installed (scope ${scope})${stale}; restart Claude Code to apply` }
+  const known = await pluginInstalled(exec, claude, spec)
+  if (known === true) {
+    try {
+      await update()
+      steps.push(updated)
+    } catch (error) {
+      steps.push({ agent: 'claude', item, state: 'failed', detail: `claude plugin update failed: ${reason(error)}` })
+    }
+    return steps
+  }
+  try {
+    await exec(claude, ['plugin', 'install', id, '--scope', scope])
+    if (known === null) await update().catch(() => undefined)
+    steps.push(installed)
+  } catch (error) {
+    if (!/already/i.test(errorText(error))) {
+      steps.push({ agent: 'claude', item, state: 'failed', detail: `claude plugin install failed: ${reason(error)}` })
+      return steps
+    }
+    try {
+      await update()
+      steps.push(updated)
+    } catch (updateError) {
+      steps.push({ agent: 'claude', item, state: 'failed', detail: `claude plugin install failed: ${reason(error)}; update failed: ${reason(updateError)}` })
+    }
+  }
+  return steps
+}
+
+export async function uninstallClaudePlugin(spec: ClaudePluginSpec, options: InstallOptions = {}): Promise<Step[]> {
+  const ctx = options.ctx ?? platformContext()
+  const id = pluginId(spec)
+  const scope = spec.scope ?? 'user'
+  const item = `plugin ${id}`
+  const claude = await locator(options, ctx)('claude')
+  if (!claude) return [{ agent: 'claude', item, state: 'unavailable', detail: `claude is not on PATH; run: claude plugin uninstall ${id} --scope ${scope}` }]
+  const exec = options.exec ?? defaultExec
+  const known = await pluginInstalled(exec, claude, spec)
+  if (known === false) return [{ agent: 'claude', item, state: 'skipped', detail: `plugin ${id} is not installed` }]
+  try {
+    await exec(claude, ['plugin', 'uninstall', id, '--scope', scope])
+    return [{ agent: 'claude', item, state: 'removed', detail: `plugin ${id} uninstalled from Claude Code` }]
+  } catch (error) {
+    if (known === null && /not (?:installed|found)/i.test(errorText(error))) return [{ agent: 'claude', item, state: 'skipped', detail: `plugin ${id} is not installed` }]
+    return [{ agent: 'claude', item, state: 'failed', detail: `claude plugin uninstall failed: ${reason(error)}` }]
+  }
+}
+
+export async function removeLegacyClaude(integration: AgentIntegration, options: InstallOptions = {}): Promise<Step[]> {
+  const ctx = options.ctx ?? platformContext()
+  const homes = agentHomes(ctx, options.homes)
+  const rendered = renderedRoot(ctx, integration.tool, 'claude')
+  const steps: Step[] = []
+  const result = (item: string, ok: boolean, where: string): Step => ({
+    agent: 'claude',
+    item,
+    state: ok ? 'removed' : 'skipped',
+    detail: ok ? `removed legacy ${where}` : `nothing kit owns at ${where}`,
+    path: where,
+  })
+  for (const skill of integration.skills ?? []) {
+    const where = path.join(homes.claude, 'skills', skill.name)
+    steps.push(result(`skill ${skill.name}`, await removeLegacyEntry(where, [skill.dir], [rendered]), where))
+  }
+  for (const command of integration.commands ?? []) {
+    const where = path.join(homes.claude, 'commands', `${command.name}.md`)
+    const source = await readFile(command.file, 'utf8').catch(() => null)
+    const copies = source === null ? [] : [source, renderForAgent(source, 'claude')]
+    steps.push(result(`command ${command.name}`, await removeLegacyEntry(where, [command.file], [rendered], copies), where))
+  }
+  if (integration.claude?.permissions || integration.claude?.hooks) {
+    const file = path.join(homes.claude, 'settings.json')
+    const loaded = await readJsonFile(file)
+    if ('error' in loaded) {
+      steps.push({ agent: 'claude', item: 'settings', state: 'failed', detail: `${loaded.error}; left alone`, path: file })
+    } else if (loaded.existed) {
+      const removed = stripClaudeSettings(integration, loaded.value)
+      if (removed > 0) await writeJsonFile(file, loaded.value, true)
+      steps.push({ agent: 'claude', item: 'settings', state: removed > 0 ? 'removed' : 'skipped', detail: removed > 0 ? `removed ${removed} legacy settings from ${file}` : 'no legacy settings', path: file })
+    }
+  }
+  if (!options.skipMcp && (integration.mcp ?? []).length > 0) {
+    const claude = await locator(options, ctx)('claude')
+    const exec = options.exec ?? defaultExec
+    for (const server of integration.mcp ?? []) {
+      if (!claude) {
+        steps.push({ agent: 'claude', item: `mcp ${server.name}`, state: 'unavailable', detail: `claude is not on PATH; run: claude mcp remove --scope user ${server.name}` })
+        continue
+      }
+      const ok = await exec(claude, ['mcp', 'remove', '--scope', 'user', server.name]).then(() => true, () => false)
+      steps.push({ agent: 'claude', item: `mcp ${server.name}`, state: ok ? 'removed' : 'skipped', detail: ok ? 'removed legacy MCP server from Claude Code' : 'not registered' })
+    }
+  }
+  await rm(rendered, { recursive: true, force: true })
   return steps
 }
 

@@ -36,6 +36,7 @@ export interface AgentIntegration {
   version: string
   description?: string
   skills?: SkillSource[]
+  userSkills?: SkillSource[]
   commands?: CommandSource[]
   mcp?: McpServer[]
   claude?: { permissions?: { allow?: string[]; ask?: string[] }; hooks?: HookMap }
@@ -66,8 +67,23 @@ export interface InstallOptions {
   agents?: readonly AgentName[] | 'detected' | 'all'
   ctx?: PlatformContext
   homes?: Partial<AgentHomes>
-  exec?: (command: string, args: readonly string[]) => Promise<void>
+  exec?: (command: string, args: readonly string[]) => Promise<void | string>
   locate?: (command: string) => Promise<string | null>
   skipMcp?: boolean
   skipHooks?: boolean
+  claudeCompat?: 'auto' | boolean
+}
+
+export interface ClaudePluginSpec {
+  marketplace: string
+  marketplaceName: string
+  plugin: string
+  scope?: 'user' | 'project' | 'local'
+}
+
+export const EDIT_TOOL_MATCHERS: Record<AgentName, string> = {
+  claude: 'Edit|Write|MultiEdit',
+  codex: 'apply_patch|Edit|Write',
+  opencode: 'edit|write|patch',
+  gemini: 'write_file|replace',
 }
