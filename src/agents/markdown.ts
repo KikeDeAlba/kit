@@ -71,3 +71,11 @@ export function commandForCodex(markdown: string): string {
   header.push('---')
   return `${header.join('\n')}\n${body}`
 }
+
+export function skillToOpenCodeCommand(markdown: string): string {
+  const { attributes, body } = parseFrontmatter(renderForAgent(markdown, 'opencode'))
+  const header = ['---']
+  if (attributes['description']) header.push(`description: ${JSON.stringify(attributes['description'])}`)
+  header.push('---')
+  return `${header.join('\n')}\n${body}`
+}

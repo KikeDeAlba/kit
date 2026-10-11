@@ -134,6 +134,67 @@ Esto lo leen todos menos Gemini.
 Si la skill no tiene bloques se enlaza tal cual; si los tiene, se genera una copia
 por agente.
 
+`userSkills` son skills que solo dispara el usuario (`disable-model-invocation:
+true`). En Claude Code viajan dentro del plugin; en opencode, Codex y Gemini kit
+las convierte en comando, igual que `commands`. Como el comando es una copia del
+`SKILL.md`, la skill no debe depender de otros archivos de su directorio.
+
+En opencode, si hay un plugin que reejecuta los hooks y comandos de Claude Code
+(por ejemplo `plugins/claude-compat`), kit no instala lo que se duplicaría:
+
+- el plugin de opencode, si los hooks de la herramienta siguen en
+  `~/.claude/settings.json`;
+- cada comando que siga en `~/.claude/commands`.
+
+Lo marca como `skipped` y borra la copia que había dejado antes. Las skills se
+instalan siempre, y también los comandos que salen de `userSkills`, porque el
+relay no los ve. `claudeCompat: false` desactiva esta detección y `true` omite el
+plugin y los comandos sin revisar. El valor por defecto es `'auto'`.
+
+`EDIT_TOOL_MATCHERS` da el matcher de las herramientas de edición de cada agente.
+Sirve para que un hook `PostToolUse` no corra tras cada herramienta.
+
+#### Plugins de Claude Code
+
+En Claude Code cada herramienta se instala como plugin. El marketplace es su
+propio repo de GitHub, con `.claude-plugin/plugin.json` y `marketplace.json`.
+
+```ts
+import { agents } from '@kikedealba/kit'
+
+const spec = { marketplace: 'KikeDeAlba/bita-cli', marketplaceName: 'bita', plugin: 'bita' }
+await agents.installClaudePlugin(spec)
+await agents.removeLegacyClaude(integration)
+await agents.installIntegration(integration, { agents: ['opencode', 'codex', 'gemini'] })
+```
+
+`installClaudePlugin` corre lo siguiente:
+
+1. `claude plugin marketplace add <marketplace>`, si el marketplace no estaba.
+2. `claude plugin marketplace update <marketplaceName>`.
+3. `claude plugin install <plugin>@<marketplaceName> --scope user` si el plugin
+   es nuevo, o `claude plugin update` si ya estaba.
+
+Para saber qué hay instalado usa `claude plugin list --json`. Si no puede leerlo,
+intenta instalar y después actualiza. Si `claude` no está en el PATH, devuelve un
+paso `unavailable` con los comandos para correrlos a mano.
+`uninstallClaudePlugin` quita el plugin y deja el marketplace, porque otro plugin
+puede compartirlo.
+
+`removeLegacyClaude` quita lo que kit 0.2 dejaba suelto en `~/.claude`:
+
+- los enlaces de skills y comandos, solo si apuntan al paquete de la herramienta
+  o a la copia que kit generó;
+- los hooks y permisos de la integración en `settings.json`;
+- sus servidores MCP (`claude mcp remove --scope user`), salvo con `skipMcp`.
+
+Hay que pasarle la integración tal como la instaló la versión anterior. Si los
+hooks cambiaron, los viejos no se reconocen.
+
+Una herramienta que ya trae plugin debe llamar a `installIntegration` sin
+`claude` en `agents`. Si no, vuelve a escribir en `~/.claude` lo que el plugin ya
+trae y Claude Code lo carga dos veces.
+
 ### 5. Credenciales
 
 `credentialStore()` elige el almacén del sistema:
