@@ -136,7 +136,8 @@ por agente.
 
 `userSkills` son skills que solo dispara el usuario (`disable-model-invocation:
 true`). En Claude Code viajan dentro del plugin; en opencode, Codex y Gemini kit
-las convierte en comando, igual que `commands`.
+las convierte en comando, igual que `commands`. Como el comando es una copia del
+`SKILL.md`, la skill no debe depender de otros archivos de su directorio.
 
 En opencode, si hay un plugin que reejecuta los hooks y comandos de Claude Code
 (por ejemplo `plugins/claude-compat`), kit no instala lo que se duplicaría:
@@ -146,8 +147,9 @@ En opencode, si hay un plugin que reejecuta los hooks y comandos de Claude Code
 - cada comando que siga en `~/.claude/commands`.
 
 Lo marca como `skipped` y borra la copia que había dejado antes. Las skills se
-instalan siempre. `claudeCompat: false` desactiva esta detección y `true` omite
-todo eso sin revisar. El valor por defecto es `'auto'`.
+instalan siempre, y también los comandos que salen de `userSkills`, porque el
+relay no los ve. `claudeCompat: false` desactiva esta detección y `true` omite el
+plugin y los comandos sin revisar. El valor por defecto es `'auto'`.
 
 `EDIT_TOOL_MATCHERS` da el matcher de las herramientas de edición de cada agente.
 Sirve para que un hook `PostToolUse` no corra tras cada herramienta.
@@ -188,6 +190,10 @@ puede compartirlo.
 
 Hay que pasarle la integración tal como la instaló la versión anterior. Si los
 hooks cambiaron, los viejos no se reconocen.
+
+Una herramienta que ya trae plugin debe llamar a `installIntegration` sin
+`claude` en `agents`. Si no, vuelve a escribir en `~/.claude` lo que el plugin ya
+trae y Claude Code lo carga dos veces.
 
 ### 5. Credenciales
 

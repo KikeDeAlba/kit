@@ -202,7 +202,7 @@ async function findClaudeRelay(homes: AgentHomes): Promise<string | null> {
   for (const name of ['opencode.json', 'opencode.jsonc']) {
     const file = path.join(homes.opencode, name)
     const text = existsSync(file) ? await readFile(file, 'utf8').catch(() => '') : ''
-    if (/"[^"\n]*claude-compat[^"\n]*"/i.test(text)) return file
+    if (/"plugin"\s*:\s*\[[^\]]*claude-compat/i.test(text)) return file
   }
   return null
 }
@@ -225,7 +225,7 @@ async function planClaudeRelay(integration: AgentIntegration, homes: AgentHomes,
   const mode = options.claudeCompat ?? 'auto'
   if (mode === false) return null
   const relay = await findClaudeRelay(homes)
-  if (mode === true) return { relay: relay ?? 'claudeCompat', plugins: true, command: () => true }
+  if (mode === true) return { relay: relay ?? 'claudeCompat', plugins: true, command: (command) => !command.fromSkill }
   if (!relay) return null
   return {
     relay,
@@ -234,8 +234,10 @@ async function planClaudeRelay(integration: AgentIntegration, homes: AgentHomes,
   }
 }
 
-async function skipRelayed(item: string, destination: string, owners: readonly string[], relay: string, ctx: PlatformContext, integration: AgentIntegration): Promise<Step> {
-  const removed = await removeLegacyEntry(destination, owners, [renderedRoot(ctx, integration.tool, 'opencode')])
+async function skipRelayed(item: string, destination: string, source: string, relay: string, ctx: PlatformContext, integration: AgentIntegration): Promise<Step> {
+  const text = await readFile(source, 'utf8').catch(() => null)
+  const copies = text === null ? [] : [text, renderForAgent(text, 'opencode')]
+  const removed = await removeLegacyEntry(destination, [source], [renderedRoot(ctx, integration.tool, 'opencode')], copies)
   return {
     agent: 'opencode',
     item,
@@ -251,13 +253,13 @@ async function installOpenCode(integration: AgentIntegration, homes: AgentHomes,
   for (const skill of integration.skills ?? []) steps.push(await placeSkill(skill, path.join(homes.opencode, 'skills', skill.name), 'opencode', integration, ctx))
   for (const command of markdownCommands(integration)) {
     const destination = path.join(homes.opencode, 'commands', `${command.name}.md`)
-    if (relay?.command(command)) steps.push(await skipRelayed(`command ${command.name}`, destination, [command.file], relay.relay, ctx, integration))
+    if (relay?.command(command)) steps.push(await skipRelayed(`command ${command.name}`, destination, command.file, relay.relay, ctx, integration))
     else steps.push(await placeMarkdownCommand(command, destination, 'opencode', integration, ctx))
   }
   for (const plugin of integration.opencode?.plugins ?? []) {
     const destination = path.join(homes.opencode, 'plugins', `${plugin.name}${path.extname(plugin.file)}`)
     if (relay?.plugins) {
-      steps.push(await skipRelayed(`plugin ${plugin.name}`, destination, [plugin.file], relay.relay, ctx, integration))
+      steps.push(await skipRelayed(`plugin ${plugin.name}`, destination, plugin.file, relay.relay, ctx, integration))
       continue
     }
     try {
@@ -538,8 +540,8 @@ function isInside(target: string, root: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
-function fromKikeDeAlba(target: string): boolean {
-  return target.split(/[\\/]/).some((segment) => segment.toLowerCase().includes('kikedealba'))
+function inToolPackage(target: string): boolean {
+  return target.split(/[\\/]/).some((segment) => segment === '@kikedealba' || segment.startsWith('@kikedealba+'))
 }
 
 async function removeLegacyEntry(where: string, owners: readonly string[], roots: readonly string[], copies: readonly string[] = []): Promise<boolean> {
@@ -548,7 +550,7 @@ async function removeLegacyEntry(where: string, owners: readonly string[], roots
   let owned = false
   if (info.isSymbolicLink()) {
     const target = path.resolve(path.dirname(where), await readlink(where))
-    owned = owners.some((owner) => path.resolve(owner) === target) || roots.some((root) => isInside(target, root)) || fromKikeDeAlba(target)
+    owned = owners.some((owner) => path.resolve(owner) === target) || roots.some((root) => isInside(target, root)) || inToolPackage(target)
   } else if (info.isFile() && copies.length > 0) {
     const text = await readFile(where, 'utf8').catch(() => null)
     owned = text !== null && copies.includes(text)
@@ -621,14 +623,16 @@ export async function installClaudePlugin(spec: ClaudePluginSpec, options: Insta
       steps.push({ agent: 'claude', item: marketplaceItem, state: 'present', detail: `marketplace ${spec.marketplaceName} already added` })
     }
   }
+  let stale = ''
   try {
     await exec(claude, ['plugin', 'marketplace', 'update', spec.marketplaceName])
   } catch (error) {
+    stale = ' from the cached catalog, which may be out of date'
     steps.push({ agent: 'claude', item: marketplaceItem, state: 'failed', detail: `claude plugin marketplace update failed: ${reason(error)}` })
   }
   const update = (): Promise<unknown> => exec(claude, ['plugin', 'update', id, '--scope', scope])
-  const updated: Step = { agent: 'claude', item, state: 'installed', detail: `plugin ${id} updated; restart Claude Code to apply` }
-  const installed: Step = { agent: 'claude', item, state: 'installed', detail: `plugin ${id} installed (scope ${scope}); restart Claude Code to apply` }
+  const updated: Step = { agent: 'claude', item, state: 'installed', detail: `plugin ${id} updated${stale}; restart Claude Code to apply` }
+  const installed: Step = { agent: 'claude', item, state: 'installed', detail: `plugin ${id} installed (scope ${scope})${stale}; restart Claude Code to apply` }
   const known = await pluginInstalled(exec, claude, spec)
   if (known === true) {
     try {
@@ -644,7 +648,7 @@ export async function installClaudePlugin(spec: ClaudePluginSpec, options: Insta
     if (known === null) await update().catch(() => undefined)
     steps.push(installed)
   } catch (error) {
-    if (known === false && !/already/i.test(errorText(error))) {
+    if (!/already/i.test(errorText(error))) {
       steps.push({ agent: 'claude', item, state: 'failed', detail: `claude plugin install failed: ${reason(error)}` })
       return steps
     }
