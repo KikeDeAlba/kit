@@ -1,6 +1,6 @@
 import type { PlatformContext } from '../platform.ts'
 
-export const AGENTS = ['claude', 'opencode', 'codex', 'gemini'] as const
+export const AGENTS = ['claude', 'opencode', 'codex', 'gemini', 'claude-desktop'] as const
 export type AgentName = (typeof AGENTS)[number]
 
 export interface HookCommand {
@@ -43,6 +43,7 @@ export interface AgentIntegration {
   opencode?: { plugins?: CommandSource[] }
   codex?: { hooks?: HookMap }
   gemini?: { hooks?: HookMap; contextFile?: string }
+  claudeDesktop?: { mcp?: McpServer[] }
 }
 
 export type StepState = 'installed' | 'present' | 'removed' | 'skipped' | 'unavailable' | 'failed'
@@ -61,6 +62,7 @@ export interface AgentHomes {
   codex: string
   agentsSkills: string
   gemini: string
+  claudeDesktop: string | null
 }
 
 export interface InstallOptions {
@@ -81,7 +83,7 @@ export interface ClaudePluginSpec {
   scope?: 'user' | 'project' | 'local'
 }
 
-export const EDIT_TOOL_MATCHERS: Record<AgentName, string> = {
+export const EDIT_TOOL_MATCHERS: Record<Exclude<AgentName, 'claude-desktop'>, string> = {
   claude: 'Edit|Write|MultiEdit',
   codex: 'apply_patch|Edit|Write',
   opencode: 'edit|write|patch',

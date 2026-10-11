@@ -106,7 +106,8 @@ una herramienta que responde a un evento no dispara otro en cadena.
 ### 4. Integración con agentes de código
 
 `agents.installIntegration` instala skills, comandos, hooks y servidores MCP en
-los agentes que encuentre: **Claude Code, opencode, Codex y Gemini CLI**.
+los agentes que encuentre: **Claude Code, opencode, Codex y Gemini CLI**, más
+los servidores MCP de **Claude Desktop**.
 
 | | Claude Code | opencode | Codex | Gemini CLI |
 |---|---|---|---|---|
@@ -150,6 +151,27 @@ Lo marca como `skipped` y borra la copia que había dejado antes. Las skills se
 instalan siempre, y también los comandos que salen de `userSkills`, porque el
 relay no los ve. `claudeCompat: false` desactiva esta detección y `true` omite el
 plugin y los comandos sin revisar. El valor por defecto es `'auto'`.
+
+#### Claude Desktop
+
+El agente `claude-desktop` solo recibe servidores MCP, y solo los de
+`claudeDesktop.mcp`. El `mcp` genérico nunca llega ahí, así que una herramienta
+puede tener MCP en Claude Desktop y quedarse en skill y CLI en los demás agentes.
+Si la herramienta no define `claudeDesktop`, el paso sale como `skipped`.
+
+| Sistema | Archivo |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | no existe; el paso sale como `unavailable` |
+
+Se detecta si existe la carpeta `Claude`. kit fusiona `mcpServers.<nombre>` y
+respeta el resto del archivo (por ejemplo `preferences`); crea el archivo solo si
+la carpeta ya existe. Un servidor stdio queda como `{ command, args, env: { PATH } }`,
+con el directorio del `node` que corre la instalación al frente del `PATH`, porque
+las apps gráficas no heredan el `PATH` de la terminal. Un servidor http queda como
+`{ type: 'http', url, headers }`. Desinstalar quita solo las entradas de la
+herramienta. Hay que reiniciar Claude Desktop para que los cargue.
 
 `EDIT_TOOL_MATCHERS` da el matcher de las herramientas de edición de cada agente.
 Sirve para que un hook `PostToolUse` no corra tras cada herramienta.

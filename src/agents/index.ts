@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { lstat, mkdir, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { dataHome, platformContext, run, which, type PlatformContext } from '../platform.ts'
+import { configHome, dataHome, pathKey, platformContext, run, which, withRuntimePath, type PlatformContext } from '../platform.ts'
 import {
   copyInto,
   linkPath,
@@ -31,7 +31,13 @@ export * from './types.ts'
 export { commandToGeminiToml, commandForCodex, renderForAgent, hasAgentBlocks, parseFrontmatter, skillToOpenCodeCommand } from './markdown.ts'
 export { mergeHooks, stripHooks } from './files.ts'
 
-const BINARIES: Record<AgentName, string> = { claude: 'claude', opencode: 'opencode', codex: 'codex', gemini: 'gemini' }
+const BINARIES: Record<AgentName, string | null> = { claude: 'claude', opencode: 'opencode', codex: 'codex', gemini: 'gemini', 'claude-desktop': null }
+
+function claudeDesktopHome(ctx: PlatformContext, join: (...parts: string[]) => string): string | null {
+  if (ctx.platform === 'darwin') return join(ctx.home, 'Library', 'Application Support', 'Claude')
+  if (ctx.platform === 'win32') return join(configHome(ctx), 'Claude')
+  return null
+}
 
 export function agentHomes(ctx: PlatformContext = platformContext(), overrides: Partial<AgentHomes> = {}): AgentHomes {
   const join = ctx.platform === 'win32' ? path.win32.join : path.posix.join
@@ -41,6 +47,7 @@ export function agentHomes(ctx: PlatformContext = platformContext(), overrides: 
     codex: overrides.codex ?? ctx.env['CODEX_HOME'] ?? join(ctx.home, '.codex'),
     agentsSkills: overrides.agentsSkills ?? join(ctx.env['KIT_AGENTS_HOME'] ?? join(ctx.home, '.agents'), 'skills'),
     gemini: overrides.gemini ?? join(ctx.env['GEMINI_CLI_HOME'] ?? ctx.home, '.gemini'),
+    claudeDesktop: overrides.claudeDesktop !== undefined ? overrides.claudeDesktop : claudeDesktopHome(ctx, join),
   }
 }
 
@@ -50,9 +57,11 @@ export async function detectAgents(
   locate: (command: string) => Promise<string | null> = (command) => which(command, ctx),
 ): Promise<AgentName[]> {
   const found: AgentName[] = []
-  const configDir: Record<AgentName, string> = { claude: homes.claude, opencode: homes.opencode, codex: homes.codex, gemini: homes.gemini }
+  const configDir: Record<AgentName, string | null> = { claude: homes.claude, opencode: homes.opencode, codex: homes.codex, gemini: homes.gemini, 'claude-desktop': homes.claudeDesktop }
   for (const agent of AGENTS) {
-    if (existsSync(configDir[agent]) || (await locate(BINARIES[agent])) !== null) found.push(agent)
+    const dir = configDir[agent]
+    const binary = BINARIES[agent]
+    if ((dir !== null && existsSync(dir)) || (binary !== null && (await locate(binary)) !== null)) found.push(agent)
   }
   return found
 }
@@ -418,6 +427,44 @@ async function installGemini(integration: AgentIntegration, homes: AgentHomes, o
   return steps
 }
 
+function claudeDesktopEntry(server: McpServer, ctx: PlatformContext): Record<string, unknown> {
+  if ('url' in server) return { type: 'http', url: server.url, ...(server.headers ? { headers: server.headers } : {}) }
+  const [command, ...args] = server.command
+  const runtimePath = withRuntimePath(ctx.env)[pathKey(ctx.env)] ?? ''
+  return { command, args, env: { PATH: runtimePath, ...server.env } }
+}
+
+async function editClaudeDesktopMcp(integration: AgentIntegration, homes: AgentHomes, options: InstallOptions, ctx: PlatformContext, mode: 'install' | 'remove'): Promise<Step> {
+  const servers = integration.claudeDesktop?.mcp ?? []
+  const item = servers.length > 0 ? `mcp ${servers.map((server) => server.name).join(', ')}` : 'mcp'
+  if (servers.length === 0) return { agent: 'claude-desktop', item, state: 'skipped', detail: `${integration.tool} has no MCP servers for Claude Desktop` }
+  if (mode === 'install' && options.skipMcp) return { agent: 'claude-desktop', item, state: 'skipped', detail: 'MCP servers skipped' }
+  if (homes.claudeDesktop === null) return { agent: 'claude-desktop', item, state: mode === 'remove' ? 'skipped' : 'unavailable', detail: 'Claude Desktop is not available on this platform' }
+  const file = (ctx.platform === 'win32' ? path.win32 : path.posix).join(homes.claudeDesktop, 'claude_desktop_config.json')
+  if (!existsSync(homes.claudeDesktop)) {
+    return { agent: 'claude-desktop', item, state: mode === 'remove' ? 'skipped' : 'unavailable', detail: `Claude Desktop is not installed (${homes.claudeDesktop} not found)`, path: file }
+  }
+  const loaded = await readJsonFile(file)
+  if ('error' in loaded) return { agent: 'claude-desktop', item, state: 'failed', detail: `${loaded.error}; left alone`, path: file }
+  const value = loaded.value
+  const current = typeof value['mcpServers'] === 'object' && value['mcpServers'] !== null && !Array.isArray(value['mcpServers']) ? (value['mcpServers'] as Record<string, unknown>) : {}
+  const next = { ...current }
+  for (const server of servers) {
+    if (mode === 'remove') delete next[server.name]
+    else next[server.name] = claudeDesktopEntry(server, ctx)
+  }
+  if (JSON.stringify(next) === JSON.stringify(current)) {
+    return mode === 'remove'
+      ? { agent: 'claude-desktop', item, state: 'skipped', detail: `not registered in ${file}`, path: file }
+      : { agent: 'claude-desktop', item, state: 'present', detail: `already registered in ${file}`, path: file }
+  }
+  value['mcpServers'] = next
+  await writeJsonFile(file, value, loaded.existed)
+  return mode === 'remove'
+    ? { agent: 'claude-desktop', item, state: 'removed', detail: `removed from ${file}; restart Claude Desktop to apply`, path: file }
+    : { agent: 'claude-desktop', item, state: 'installed', detail: `registered in ${file}; restart Claude Desktop to apply`, path: file }
+}
+
 export async function installIntegration(integration: AgentIntegration, options: InstallOptions = {}): Promise<Step[]> {
   const ctx = options.ctx ?? platformContext()
   const homes = agentHomes(ctx, options.homes)
@@ -428,7 +475,8 @@ export async function installIntegration(integration: AgentIntegration, options:
       if (agent === 'claude') steps.push(...(await installClaude(integration, homes, options, ctx)))
       else if (agent === 'opencode') steps.push(...(await installOpenCode(integration, homes, options, ctx)))
       else if (agent === 'codex') steps.push(...(await installCodex(integration, homes, options, ctx)))
-      else steps.push(...(await installGemini(integration, homes, options, ctx)))
+      else if (agent === 'gemini') steps.push(...(await installGemini(integration, homes, options, ctx)))
+      else steps.push(await editClaudeDesktopMcp(integration, homes, options, ctx, 'install'))
     } catch (error) {
       steps.push({ agent, item: 'integration', state: 'failed', detail: reason(error) })
     }
@@ -509,6 +557,7 @@ export async function uninstallIntegration(integration: AgentIntegration, option
       await rm(root, { recursive: true, force: true })
       steps.push(removed(agent, 'extension', ok, root))
     }
+    if (agent === 'claude-desktop') steps.push(await editClaudeDesktopMcp(integration, homes, options, ctx, 'remove'))
   }
   for (const agent of AGENTS) await rm(renderedRoot(ctx, integration.tool, agent), { recursive: true, force: true })
   return steps
