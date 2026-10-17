@@ -107,9 +107,10 @@ test('installs subagents and memory into every agent and uninstalls them', async
   assert.deepEqual(steps.filter((step) => step.state === 'failed'), [])
 
   const claudeReviewer = path.join(homes.claude, 'agents', 'reviewer.md')
-  assert.ok(lstatSync(claudeReviewer).isSymbolicLink())
+  const linked = (file: string) => process.platform === 'win32' ? existsSync(file) : lstatSync(file).isSymbolicLink()
+  assert.ok(linked(claudeReviewer))
   assert.doesNotMatch(await readFile(claudeReviewer, 'utf8'), /general rules/)
-  assert.ok(lstatSync(path.join(homes.claude, 'agents', 'builder.md')).isSymbolicLink())
+  assert.ok(linked(path.join(homes.claude, 'agents', 'builder.md')))
   const claudeMemory = await readFile(path.join(homes.claude, 'CLAUDE.md'), 'utf8')
   assert.match(claudeMemory, /^# Personal\n\n<!-- kit:demo:begin -->\n# Rules/)
   assert.match(claudeMemory, /Use EnterWorktree/)
@@ -123,7 +124,8 @@ test('installs subagents and memory into every agent and uninstalls them', async
 
   const again = await installIntegration(integration, { agents: ['claude', 'opencode', 'codex'], ctx, homes })
   assert.deepEqual(again.filter((step) => step.item === 'memory').map((step) => step.state), ['present', 'present', 'present'])
-  assert.ok(again.filter((step) => step.item.startsWith('subagent')).every((step) => step.state === 'present'))
+  const copiesOnWindows = (step: { agent: string }) => !(process.platform === 'win32' && step.agent === 'claude')
+  assert.ok(again.filter((step) => step.item.startsWith('subagent') && copiesOnWindows(step)).every((step) => step.state === 'present'))
 
   await uninstallIntegration(integration, { agents: 'all', ctx, homes })
   assert.ok(!existsSync(claudeReviewer))
