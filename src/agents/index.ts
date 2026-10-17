@@ -14,6 +14,7 @@ import {
   writeJsonFile,
 } from './files.ts'
 import { commandForCodex, commandToGeminiToml, hasAgentBlocks, renderForAgent, skillToOpenCodeCommand } from './markdown.ts'
+import { MEMORY_FILES, removeMemoryBlock, subagentForCodex, subagentForGemini, subagentForOpenCode, upsertMemoryBlock } from './subagents.ts'
 import {
   AGENTS,
   type AgentHomes,
@@ -25,10 +26,12 @@ import {
   type McpServer,
   type SkillSource,
   type Step,
+  type SubagentSource,
 } from './types.ts'
 
 export * from './types.ts'
 export { commandToGeminiToml, commandForCodex, renderForAgent, hasAgentBlocks, parseFrontmatter, skillToOpenCodeCommand } from './markdown.ts'
+export { memoryBlock, parseSubagent, removeMemoryBlock, subagentForCodex, subagentForGemini, subagentForOpenCode, upsertMemoryBlock, MEMORY_FILES } from './subagents.ts'
 export { mergeHooks, stripHooks } from './files.ts'
 
 const BINARIES: Record<AgentName, string | null> = { claude: 'claude', opencode: 'opencode', codex: 'codex', gemini: 'gemini', 'claude-desktop': null }
@@ -137,6 +140,74 @@ async function placeMarkdownCommand(command: MarkdownCommand, destination: strin
   }
 }
 
+async function linkClaudeSubagent(subagent: SubagentSource, homes: AgentHomes, integration: AgentIntegration, ctx: PlatformContext): Promise<Step> {
+  const destination = path.join(homes.claude, 'agents', `${subagent.name}.md`)
+  try {
+    const text = await readFile(subagent.file, 'utf8')
+    if (hasAgentBlocks(text)) {
+      const rendered = path.join(renderedRoot(ctx, integration.tool, 'claude'), 'agents', `${subagent.name}.md`)
+      const next = renderForAgent(text, 'claude')
+      const unchanged = existsSync(rendered) && (await readFile(rendered, 'utf8')) === next
+      await mkdir(path.dirname(rendered), { recursive: true })
+      if (!unchanged) await writeFile(rendered, next)
+      const state = await linkPath(rendered, destination, ctx.platform)
+      return { agent: 'claude', item: `subagent ${subagent.name}`, state: unchanged ? state : 'installed', detail: `subagent ${subagent.name} rendered for claude`, path: destination }
+    }
+    const state = await linkPath(subagent.file, destination, ctx.platform)
+    return { agent: 'claude', item: `subagent ${subagent.name}`, state, detail: `subagent ${subagent.name} linked`, path: destination }
+  } catch (error) {
+    return { agent: 'claude', item: `subagent ${subagent.name}`, state: 'failed', detail: reason(error), path: destination }
+  }
+}
+
+async function writeSubagent(subagent: SubagentSource, agent: AgentName, destination: string, convert: (markdown: string, name: string) => string): Promise<Step> {
+  try {
+    const next = convert(await readFile(subagent.file, 'utf8'), subagent.name)
+    const current = existsSync(destination) ? await readFile(destination, 'utf8') : null
+    if (current === next) return { agent, item: `subagent ${subagent.name}`, state: 'present', detail: `subagent ${subagent.name} already there`, path: destination }
+    await mkdir(path.dirname(destination), { recursive: true })
+    await writeFile(destination, next)
+    return { agent, item: `subagent ${subagent.name}`, state: 'installed', detail: `subagent ${subagent.name} written`, path: destination }
+  } catch (error) {
+    return { agent, item: `subagent ${subagent.name}`, state: 'failed', detail: reason(error), path: destination }
+  }
+}
+
+function memoryFile(agent: Exclude<AgentName, 'claude-desktop'>, homes: AgentHomes): string {
+  const base = { claude: homes.claude, opencode: homes.opencode, codex: homes.codex, gemini: homes.gemini }[agent]
+  return path.join(base, MEMORY_FILES[agent])
+}
+
+async function installMemory(integration: AgentIntegration, agent: Exclude<AgentName, 'claude-desktop'>, homes: AgentHomes): Promise<Step | null> {
+  if (!integration.memory) return null
+  const file = memoryFile(agent, homes)
+  try {
+    const content = renderForAgent(await readFile(integration.memory, 'utf8'), agent)
+    const current = existsSync(file) ? await readFile(file, 'utf8') : ''
+    const next = upsertMemoryBlock(current, integration.tool, content)
+    if (next === current) return { agent, item: 'memory', state: 'present', detail: `memory block already up to date in ${file}`, path: file }
+    await mkdir(path.dirname(file), { recursive: true })
+    if (current.length > 0) await writeFile(`${file}.backup`, current)
+    await writeFile(file, next)
+    return { agent, item: 'memory', state: 'installed', detail: `memory block written to ${file}`, path: file }
+  } catch (error) {
+    return { agent, item: 'memory', state: 'failed', detail: reason(error), path: file }
+  }
+}
+
+async function uninstallMemory(integration: AgentIntegration, agent: Exclude<AgentName, 'claude-desktop'>, homes: AgentHomes): Promise<Step | null> {
+  if (!integration.memory) return null
+  const file = memoryFile(agent, homes)
+  const current = existsSync(file) ? await readFile(file, 'utf8') : ''
+  const stripped = removeMemoryBlock(current, integration.tool)
+  if (stripped.removed) await writeFile(file, stripped.text)
+  return { agent, item: 'memory', state: stripped.removed ? 'removed' : 'skipped', detail: stripped.removed ? `removed memory block from ${file}` : `no memory block in ${file}`, path: file }
+}
+
+function pushed(steps: Step[], step: Step | null): void {
+  if (step) steps.push(step)
+}
+
 async function defaultExec(command: string, args: readonly string[]): Promise<string> {
   return (await run(command, args, { timeoutMs: 120_000 })).stdout
 }
@@ -151,6 +222,8 @@ async function installClaude(integration: AgentIntegration, homes: AgentHomes, o
   for (const command of integration.commands ?? []) {
     steps.push(await placeMarkdownCommand({ ...command, fromSkill: false }, path.join(homes.claude, 'commands', `${command.name}.md`), 'claude', integration, ctx))
   }
+  for (const subagent of integration.subagents ?? []) steps.push(await linkClaudeSubagent(subagent, homes, integration, ctx))
+  pushed(steps, await installMemory(integration, 'claude', homes))
   const settings = integration.claude
   if (settings && (settings.permissions || (settings.hooks && !options.skipHooks))) {
     const file = path.join(homes.claude, 'settings.json')
@@ -278,6 +351,10 @@ async function installOpenCode(integration: AgentIntegration, homes: AgentHomes,
       steps.push({ agent: 'opencode', item: `plugin ${plugin.name}`, state: 'failed', detail: reason(error), path: destination })
     }
   }
+  for (const subagent of integration.subagents ?? []) {
+    steps.push(await writeSubagent(subagent, 'opencode', path.join(homes.opencode, 'agents', `${subagent.name}.md`), subagentForOpenCode))
+  }
+  pushed(steps, await installMemory(integration, 'opencode', homes))
   if (!options.skipMcp && (integration.mcp ?? []).length > 0) steps.push(await editOpenCodeMcp(integration.mcp ?? [], homes, 'install'))
   return steps
 }
@@ -318,6 +395,10 @@ async function installCodex(integration: AgentIntegration, homes: AgentHomes, op
       steps.push({ agent: 'codex', item: `command ${command.name}`, state: 'failed', detail: reason(error), path: destination })
     }
   }
+  for (const subagent of integration.subagents ?? []) {
+    steps.push(await writeSubagent(subagent, 'codex', path.join(homes.codex, 'agents', `${subagent.name}.toml`), subagentForCodex))
+  }
+  pushed(steps, await installMemory(integration, 'codex', homes))
   if (integration.codex?.hooks && !options.skipHooks) {
     const file = path.join(homes.codex, 'hooks.json')
     const loaded = await readJsonFile(file)
@@ -389,6 +470,12 @@ async function installGemini(integration: AgentIntegration, homes: AgentHomes, o
       }
     }
   }
+  const subagentsDir = path.join(root, 'agents')
+  await rm(subagentsDir, { recursive: true, force: true })
+  for (const subagent of integration.subagents ?? []) {
+    steps.push(await writeSubagent(subagent, 'gemini', path.join(subagentsDir, `${subagent.name}.md`), subagentForGemini))
+  }
+  pushed(steps, await installMemory(integration, 'gemini', homes))
   const hooksFile = path.join(root, 'hooks', 'hooks.json')
   if (integration.gemini?.hooks && !options.skipHooks) {
     await writeJsonFile(hooksFile, { hooks: integration.gemini.hooks }, false)
@@ -497,6 +584,21 @@ export async function uninstallIntegration(integration: AgentIntegration, option
     path: where,
   })
   for (const agent of agents) {
+    if (agent !== 'claude-desktop') pushed(steps, await uninstallMemory(integration, agent, homes))
+    if (agent === 'claude') {
+      for (const subagent of integration.subagents ?? []) {
+        const where = path.join(homes.claude, 'agents', `${subagent.name}.md`)
+        steps.push(removed(agent, `subagent ${subagent.name}`, await removeOwnedLink(where), where))
+      }
+    }
+    if (agent === 'opencode' || agent === 'codex') {
+      for (const subagent of integration.subagents ?? []) {
+        const where = agent === 'opencode' ? path.join(homes.opencode, 'agents', `${subagent.name}.md`) : path.join(homes.codex, 'agents', `${subagent.name}.toml`)
+        const ok = existsSync(where)
+        await rm(where, { force: true })
+        steps.push(removed(agent, `subagent ${subagent.name}`, ok, where))
+      }
+    }
     if (agent === 'claude' || agent === 'opencode') {
       const base = agent === 'claude' ? homes.claude : homes.opencode
       for (const skill of integration.skills ?? []) {
