@@ -105,7 +105,7 @@ una herramienta que responde a un evento no dispara otro en cadena.
 
 ### 4. Integración con agentes de código
 
-`agents.installIntegration` instala skills, comandos, hooks y servidores MCP en
+`agents.installIntegration` instala skills, comandos, subagentes, memoria global, hooks y servidores MCP en
 los agentes que encuentre: **Claude Code, opencode, Codex y Gemini CLI**, más
 los servidores MCP de **Claude Desktop**.
 
@@ -115,9 +115,37 @@ los servidores MCP de **Claude Desktop**.
 | Comandos | `~/.claude/commands/*.md` | `~/.config/opencode/commands/*.md` | `~/.codex/prompts/*.md` | extensión `commands/*.toml` |
 | Hooks | `settings.json` | plugin | `~/.codex/hooks.json` | extensión `hooks/hooks.json` |
 | MCP | `claude mcp add --scope user` | `opencode.json` | `config.toml` | `gemini-extension.json` |
+| Subagentes | `~/.claude/agents/<n>.md` | `~/.config/opencode/agents/<n>.md` | `~/.codex/agents/<n>.toml` | extensión `agents/<n>.md` |
+| Memoria | `~/.claude/CLAUDE.md` | `~/.config/opencode/AGENTS.md` | `~/.codex/AGENTS.md` | `~/.gemini/GEMINI.md` |
 
 Para Gemini se escribe una extensión completa en
 `~/.gemini/extensions/<herramienta>/`.
+
+#### Subagentes
+
+`subagents` recibe archivos en el formato de Claude Code: frontmatter con `name`,
+`description`, `tools`, `model`, `effort` y `maxTurns`, y el cuerpo es el prompt.
+En Claude se enlazan tal cual (o renderizados si tienen bloques `::: agent`). En
+los demás agentes kit los convierte:
+
+| Campo | opencode | Codex | Gemini CLI |
+|---|---|---|---|
+| `description` | `description`, con `mode: subagent` | `description` | `description`, con `kind: local` |
+| `tools` | `permission` con `deny` para edit, bash, webfetch y websearch que no estén | `[features] shell_tool = false` si no hay `Bash` | `tools` con los nombres de Gemini |
+| `effort` | — | `model_reasoning_effort` (`max` pasa a `xhigh`) | — |
+| `maxTurns` | `steps` | — | `max_turns` |
+| cuerpo | cuerpo | `developer_instructions` | cuerpo |
+
+`model` solo se respeta en Claude. En los demás se hereda el modelo de la sesión,
+porque los alias de Claude no existen ahí.
+
+#### Memoria global
+
+`memory` es un markdown que se escribe como bloque administrado en la memoria
+global de cada agente, entre `<!-- kit:<herramienta>:begin -->` y
+`<!-- kit:<herramienta>:end -->`. Lo demás del archivo no se toca: instalar de nuevo
+reemplaza solo el bloque, y desinstalar lo quita. Antes de cambiar un archivo
+existente se deja una copia en `<archivo>.backup`. Admite bloques `::: agent`.
 
 Hay una sola skill por herramienta. Lo que aplica solo a algunos agentes va en
 bloques:
