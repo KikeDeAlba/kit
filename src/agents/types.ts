@@ -31,6 +31,11 @@ export interface CommandSource {
   file: string
 }
 
+export interface SubagentSource {
+  name: string
+  file: string
+}
+
 export interface AgentIntegration {
   tool: string
   version: string
@@ -38,6 +43,8 @@ export interface AgentIntegration {
   skills?: SkillSource[]
   userSkills?: SkillSource[]
   commands?: CommandSource[]
+  subagents?: SubagentSource[]
+  memory?: string
   mcp?: McpServer[]
   claude?: { permissions?: { allow?: string[]; ask?: string[] }; hooks?: HookMap }
   opencode?: { plugins?: CommandSource[] }
