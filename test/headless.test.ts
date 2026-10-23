@@ -2,13 +2,15 @@ import assert from 'node:assert/strict'
 import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { test } from 'node:test'
-import { HeadlessError, liveHeadlessGroups, headlessEnv, headlessEnvironment, headlessInvocation, isHeadlessAgent, parseHeadlessOutput, pickHeadlessAgent, runHeadless, type HeadlessAgent } from '../src/agents/index.ts'
-import { platformContext } from '../src/platform.ts'
+import { HEADLESS_AGENTS, HeadlessError, WINDOWS_COMMAND_LINE_LIMIT, liveHeadlessGroups, headlessEnv, headlessEnvironment, headlessInvocation, isHeadlessAgent, parseHeadlessOutput, pickHeadlessAgent, runHeadless, type HeadlessAgent } from '../src/agents/index.ts'
+import { platformContext, spawnSpec } from '../src/platform.ts'
 import { sandbox, tempDir } from './helpers.ts'
 
 const FIXTURES = path.join(import.meta.dirname, 'fixtures', 'headless')
 
 const fixture = (name: string) => readFile(path.join(FIXTURES, name), 'utf8')
+
+const agyResult = (result: Record<string, unknown>) => `${JSON.stringify({ event: 'result', result })}\n`
 
 function failure(code: HeadlessError['code'], pattern?: RegExp) {
   return (error: unknown) => {
@@ -23,7 +25,7 @@ test('parses the JSON output of every harness', async () => {
   assert.deepEqual(parseHeadlessOutput('claude', await fixture('claude.json')), { text: 'Resumen listo.', sessionId: '6f1c2a5e-1111-4a2b-9c3d-000000000001' })
   assert.deepEqual(parseHeadlessOutput('codex', await fixture('codex.jsonl')), { text: 'Final answer.', sessionId: '0199a213-81c0-7800-8aa1-bbab2a035a53' })
   assert.deepEqual(parseHeadlessOutput('gemini', await fixture('gemini.json')), { text: 'Hola {desde} gemini.\n{no es json}', sessionId: 'b3c1d2e4-2222-4f00-8000-000000000003' })
-  assert.deepEqual(parseHeadlessOutput('antigravity', await fixture('antigravity.json')), { text: 'OK\n', sessionId: '49156f6b-9013-4da5-96c9-92efe16b0285' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', await fixture('antigravity.jsonl')), { text: 'OK\n', sessionId: 'f8a5cf1c-3acb-4c72-8e12-0f761124f385' })
   assert.deepEqual(parseHeadlessOutput('opencode', await fixture('opencode.jsonl')), { text: 'OK\n\nSecond message.', sessionId: 'ses_e99277354ffeVY91vRD90IQUTu' })
 })
 
@@ -39,12 +41,15 @@ test('harness errors and garbage are reported with a code', async () => {
   const opencodeError = await fixture('opencode-error.jsonl')
   assert.throws(() => parseHeadlessOutput('opencode', opencodeError), failure('FAILED', /No API key/))
   assert.throws(() => parseHeadlessOutput('opencode', ''), failure('PARSE'))
-  assert.throws(() => parseHeadlessOutput('antigravity', '{"conversation_id":"x"}'), failure('PARSE'))
-  const denied = await fixture('antigravity-denied.json')
-  assert.throws(() => parseHeadlessOutput('antigravity', denied), failure('FAILED', /permission denied for write_file/))
-  const agyError = await fixture('antigravity-error.json')
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"event":"init","conversation_id":"x"}'), failure('PARSE', /no result event/))
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"conversation_id":"x","response":"legacy"}'), failure('PARSE'))
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"event":"result","result":{"conversation_id":"x","status":"SUCCESS"}}'), failure('PARSE', /no "response"/))
+  const denied = await fixture('antigravity-denied.jsonl')
+  assert.throws(() => parseHeadlessOutput('antigravity', denied), failure('FAILED', /permission denied for command/))
+  const agyError = await fixture('antigravity-error.jsonl')
   assert.throws(() => parseHeadlessOutput('antigravity', agyError), failure('FAILED', /empty prompt/))
-  assert.deepEqual(parseHeadlessOutput('antigravity', '{"response":"done","conversation_id":"c","denied_actions":[{"action":"run_command"}]}'), { text: 'done', sessionId: 'c' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', agyResult({ response: 'done', conversation_id: 'c', denied_actions: [{ action: 'run_command' }] })), { text: 'done', sessionId: 'c' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', `{"event":"init","conversation_id":"i"}\n${agyResult({ response: 'r', conversation_id: '' })}`), { text: 'r', sessionId: 'i' })
   assert.throws(() => parseHeadlessOutput('nope' as HeadlessAgent, '{}'), failure('UNAVAILABLE'))
   const codexFailed = await fixture('codex-failed.jsonl')
   assert.throws(() => parseHeadlessOutput('codex', codexFailed), failure('FAILED', /usage limit/))
@@ -54,7 +59,7 @@ test('each harness gets its own flags, sandbox and prompt channel', () => {
   const base = { prompt: '- hello', cwd: '/work' }
   const claudeRead = headlessInvocation('claude', { ...base, model: 'sonnet', extraArgs: ['--verbose'] })
   assert.deepEqual(claudeRead, {
-    args: ['-p', '--output-format', 'json', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'sonnet', '--verbose'],
+    args: ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'sonnet', '--verbose'],
     stdin: '- hello',
     env: {},
   })
@@ -69,9 +74,9 @@ test('each harness gets its own flags, sandbox and prompt channel', () => {
   assert.deepEqual(geminiWrite.args, ['-o', 'json', '--approval-mode', 'auto_edit'])
   assert.equal(geminiWrite.env['GEMINI_CLI_TRUST_WORKSPACE'], 'true')
   const agy = headlessInvocation('antigravity', base)
-  assert.deepEqual(agy.args, ['--print=- hello', '--output-format', 'json', '--mode', 'plan'])
-  assert.equal(agy.stdin, undefined)
-  assert.deepEqual(headlessInvocation('antigravity', { ...base, access: 'write', model: 'm' }).args, ['--print=- hello', '--output-format', 'json', '--model', 'm', '--dangerously-skip-permissions'])
+  assert.deepEqual(agy.args, ['--input-format', 'stream-json', '--output-format', 'stream-json', '--mode', 'plan', '-p='])
+  assert.equal(agy.stdin, '{"event":"user","message":{"content":"- hello"}}\n')
+  assert.deepEqual(headlessInvocation('antigravity', { ...base, access: 'write', model: 'm', extraArgs: ['--x'] }).args, ['--input-format', 'stream-json', '--output-format', 'stream-json', '--model', 'm', '--dangerously-skip-permissions', '--x', '-p='])
   const opencode = headlessInvocation('opencode', { ...base, model: 'anthropic/claude' })
   assert.deepEqual(opencode.args, ['run', '--format', 'json', '--agent', 'plan', '-m', 'anthropic/claude'])
   assert.equal(opencode.stdin, '- hello')
@@ -123,7 +128,7 @@ test('runHeadless spawns the harness with the prompt on stdin and KIT_HEADLESS s
   const result = await runHeadless({ agent: 'claude', prompt: 'summarize this', cwd: home, bin: claude, model: 'haiku', ctx: sandbox(home), onSpawn: (pid) => pids.push(pid) })
   const seen = JSON.parse(result.text) as { input: string; args: string[]; headless: string; path: string; cwd: string }
   assert.equal(seen.input, 'summarize this')
-  assert.deepEqual(seen.args, ['-p', '--output-format', 'json', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'haiku'])
+  assert.deepEqual(seen.args, ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'haiku'])
   assert.equal(seen.headless, '1')
   assert.equal(seen.path, bin)
   assert.equal(await realpath(seen.cwd), await realpath(home))
@@ -157,13 +162,19 @@ test('runHeadless maps exits, timeouts, aborts and missing binaries to error cod
   await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: path.join(home, 'missing'), ctx }), failure('UNAVAILABLE'))
 })
 
-test('prompts passed as arguments through cmd.exe are refused on Windows when they cannot survive', async (t) => {
+test('long multi-line prompts stay off the command line, even for agy.cmd on Windows', async (t) => {
   const home = await tempDir(t)
   const ctx = platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: {} })
   const bin = 'C:\\Users\\a\\AppData\\Roaming\\npm\\agy.cmd'
-  await assert.rejects(runHeadless({ agent: 'antigravity', prompt: 'x'.repeat(8200), cwd: home, bin, ctx }), failure('PROMPT_TOO_LONG', /8191/))
-  await assert.rejects(runHeadless({ agent: 'antigravity', prompt: '&'.repeat(2500), cwd: home, bin, ctx }), failure('PROMPT_TOO_LONG'))
-  await assert.rejects(runHeadless({ agent: 'antigravity', prompt: 'one\ntwo', cwd: home, bin, ctx }), failure('FAILED', /line break/))
+  const prompt = Array.from({ length: 6000 }, (_, index) => `line ${index}: ${'&%^"'.repeat(12)}`).join('\r\n')
+  assert.ok(prompt.length > 300_000)
+  for (const agent of HEADLESS_AGENTS) {
+    const invocation = headlessInvocation(agent, { prompt, cwd: home })
+    assert.ok(invocation.args.every((arg) => !arg.includes('line 1:')), agent)
+    assert.ok((spawnSpec(bin, invocation.args, ctx).args.at(-1) ?? '').length < WINDOWS_COMMAND_LINE_LIMIT, agent)
+    assert.ok(invocation.stdin?.includes('line 5999:'), agent)
+  }
+  assert.deepEqual(JSON.parse(headlessInvocation('antigravity', { prompt, cwd: home }).stdin ?? ''), { event: 'user', message: { content: prompt } })
   await assert.rejects(runHeadless({ agent: 'nope' as HeadlessAgent, prompt: 'x', cwd: home, bin, ctx }), failure('UNAVAILABLE'))
   await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: path.join(home, 'missing'), bin: process.execPath, ctx: sandbox(home) }), failure('FAILED', /does not exist/))
 })
@@ -196,6 +207,7 @@ process.stdin.setEncoding('utf8').on('data', (chunk) => (input += chunk)).on('en
   console.log(JSON.stringify({ type: 'thread.started', thread_id: 't' }))
   console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: seen } }))
   console.log(JSON.stringify({ type: 'text', sessionID: 'o', part: { id: 'p', messageID: 'm', text: seen } }))
+  console.log(JSON.stringify({ event: 'result', result: { conversation_id: 'c', status: 'SUCCESS', response: seen } }))
   console.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: seen, response: seen, conversation_id: 'c' }))
 })
 `
@@ -211,8 +223,10 @@ test('prompts with dashes, quotes, shell characters and line breaks arrive untou
       assert.ok(!seen.args.includes(prompt) || prompt === '-p' || prompt === '--help' || prompt === '')
     }
     const seen = JSON.parse((await runHeadless({ agent: 'antigravity', prompt, cwd: home, bin: echo, ctx })).text) as { input: string; args: string[] }
-    assert.equal(seen.input, '')
-    assert.equal(seen.args[0], `--print=${prompt}`)
+    assert.deepEqual(JSON.parse(seen.input), { event: 'user', message: { content: prompt } })
+    assert.ok(seen.input.endsWith('}\n') && !seen.input.slice(0, -1).includes('\n'))
+    assert.equal(seen.args.at(-1), '-p=')
+    assert.ok(!seen.args.some((arg) => arg.includes(prompt) && prompt.length > 3))
   }
 })
 
@@ -394,9 +408,9 @@ test('signal handlers are registered only while children are alive', { skip: pro
 })
 
 test('antigravity keeps a useful response even when it also reports an error', () => {
-  assert.deepEqual(parseHeadlessOutput('antigravity', '{"status":"SUCCESS","response":"Done.","error":"tool timeout","conversation_id":"c"}'), { text: 'Done.', sessionId: 'c' })
-  assert.throws(() => parseHeadlessOutput('antigravity', '{"status":"SUCCESS","response":"  ","error":"tool timeout"}'), failure('FAILED', /tool timeout/))
-  assert.throws(() => parseHeadlessOutput('antigravity', '{"status":"ERROR","response":"partial","error":"quota"}'), failure('FAILED', /quota/))
+  assert.deepEqual(parseHeadlessOutput('antigravity', agyResult({ status: 'SUCCESS', response: 'Done.', error: 'tool timeout', conversation_id: 'c' })), { text: 'Done.', sessionId: 'c' })
+  assert.throws(() => parseHeadlessOutput('antigravity', agyResult({ status: 'SUCCESS', response: '  ', error: 'tool timeout' })), failure('FAILED', /tool timeout/))
+  assert.throws(() => parseHeadlessOutput('antigravity', agyResult({ status: 'ERROR', response: 'partial', error: 'quota' })), failure('FAILED', /quota/))
 })
 
 test('unset removes variables without regard to case on Windows', async (t) => {
@@ -414,4 +428,85 @@ test('unset removes variables without regard to case on Windows', async (t) => {
     const windows = await runHeadless({ agent: 'gemini', prompt: 'p', cwd: home, bin: direct, ctx: platformContext({ platform: 'win32', home, env }) })
     assert.equal(windows.text, 'false')
   }
+})
+
+test('claude tools replace the default read set and an empty list leaves no tools at all', () => {
+  const base = { prompt: 'p', cwd: '/work' }
+  const strictEmpty = ['--strict-mcp-config', '--tools', 'Read,Grep,Glob', '--disallowedTools', 'Read,Grep,Glob']
+  assert.deepEqual(headlessInvocation('claude', { ...base, tools: [] }).args, ['-p', '--output-format', 'json', ...strictEmpty, '--permission-mode', 'plan', '--setting-sources', 'user'])
+  assert.deepEqual(headlessInvocation('claude', { ...base, tools: [' ', ''], access: 'write' }).args, ['-p', '--output-format', 'json', ...strictEmpty, '--permission-mode', 'acceptEdits'])
+  const read = headlessInvocation('claude', { ...base, tools: ['Read'] }).args
+  assert.deepEqual(read, ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', 'Read', '--permission-mode', 'plan', '--setting-sources', 'user'])
+  assert.equal(read.filter((arg) => arg === '--tools').length, 1)
+  assert.deepEqual(headlessInvocation('claude', { ...base, tools: ['Read', 'Write'], access: 'write' }).args, ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', 'Read,Write', '--permission-mode', 'acceptEdits'])
+  assert.deepEqual(headlessInvocation('claude', { ...base, access: 'write' }).args, ['-p', '--output-format', 'json', '--permission-mode', 'acceptEdits'])
+  for (const agent of ['codex', 'gemini', 'antigravity', 'opencode'] as HeadlessAgent[]) {
+    assert.deepEqual(headlessInvocation(agent, { ...base, tools: ['Read'] }), headlessInvocation(agent, base), agent)
+  }
+})
+
+test('runHeadless stops a harness that prints more than maxOutputBytes', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const flood = await fakeHarness(home, 'flood.cjs', `const line = 'x'.repeat(65536) + '\\n'\nconst write = () => { while (process.stdout.write(line)) {} process.stdout.once('drain', write) }\nwrite()\nsetTimeout(() => {}, 60000)`)
+  const started = Date.now()
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: flood, ctx, maxOutputBytes: 1024 * 1024, timeoutMs: 30000 }), failure('FAILED', /more than 1048576 bytes on stdout/))
+  assert.ok(Date.now() - started < 20000)
+  assert.deepEqual(liveHeadlessGroups(), [])
+  const small = await fakeHarness(home, 'small.cjs', `console.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: 'ok' }))`)
+  assert.equal((await runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: small, ctx, maxOutputBytes: 200 })).text, 'ok')
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: small, ctx, maxOutputBytes: 10 }), failure('FAILED', /more than 10 bytes/))
+})
+
+test('runHeadless keeps only the tail of stderr past maxOutputBytes and still succeeds', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const noisy = await fakeHarness(home, 'noisy.cjs', `for (let i = 0; i < 400; i++) process.stderr.write('ñ'.repeat(1000) + '\\n')\nprocess.stderr.write('LAST LINE\\n')\nconsole.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: 'ok' }))`)
+  const result = await runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: noisy, ctx: sandbox(home), maxOutputBytes: 4096 })
+  assert.equal(result.text, 'ok')
+  assert.ok(Buffer.byteLength(result.stderr) <= 4096)
+  assert.ok(result.stderr.endsWith('LAST LINE\n'))
+  assert.ok(!result.stderr.includes('\uFFFD'))
+})
+
+const agyDelta = (step: number, delta: string) => `${JSON.stringify({ event: 'step_update', step_update: { conversation_id: 'c', step_index: step, state: 'ACTIVE', step_type: 'agent_response', text_delta: delta } })}\n`
+
+test('antigravity streams: several results, ids from init, text deltas and error events', () => {
+  const init = '{"event":"init","conversation_id":"from-init","init":{}}\n'
+  assert.deepEqual(parseHeadlessOutput('antigravity', init + agyResult({ conversation_id: 'a', status: 'SUCCESS', response: 'first' }) + agyResult({ conversation_id: 'b', status: 'SUCCESS', response: 'second' })), { text: 'second', sessionId: 'b' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', init + agyResult({ conversation_id: '', status: 'SUCCESS', response: 'r' })), { text: 'r', sessionId: 'from-init' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', init + agyDelta(1, 'Hel') + agyDelta(1, 'lo') + agyDelta(3, 'again') + agyResult({ conversation_id: '', status: 'SUCCESS', response: '' })), { text: 'Hello\n\nagain', sessionId: 'from-init' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', agyDelta(1, 'old') + agyResult({ status: 'SUCCESS', response: 'one' }) + agyDelta(1, 'two') + agyResult({ status: 'SUCCESS', response: '' })), { text: 'two' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', init + agyDelta(1, 'partial ') + agyDelta(1, 'answer')), { text: 'partial answer', sessionId: 'from-init' })
+  assert.throws(() => parseHeadlessOutput('antigravity', init + agyDelta(1, 'partial') + '{"event":"error","error":{"message":"stream broke"}}\n'), failure('FAILED', /stream broke/))
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"event":"error","message":"quota exceeded"}\n'), failure('FAILED', /quota exceeded/))
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"event":"error","message":"late"}\n' + agyResult({ status: 'SUCCESS', response: '' })), failure('FAILED', /late/))
+  assert.deepEqual(parseHeadlessOutput('antigravity', '{"event":"error","message":"tool hiccup"}\n' + agyResult({ status: 'SUCCESS', response: 'fine', conversation_id: 'c' })), { text: 'fine', sessionId: 'c' })
+})
+
+test('runHeadless returns partial agy deltas only when the process exits cleanly', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const lines = JSON.stringify(agyDelta(1, 'partial') + agyDelta(1, ' text'))
+  const clean = await fakeHarness(home, 'clean.cjs', `process.stdin.resume().on('end', () => process.stdout.write(${lines}))`)
+  assert.equal((await runHeadless({ agent: 'antigravity', prompt: 'x', cwd: home, bin: clean, ctx })).text, 'partial text')
+  const crash = await fakeHarness(home, 'crash.cjs', `process.stdin.resume().on('end', () => { process.stdout.write(${lines}); process.exitCode = 3 })`)
+  await assert.rejects(runHeadless({ agent: 'antigravity', prompt: 'x', cwd: home, bin: crash, ctx }), failure('FAILED', /exited with 3/))
+})
+
+test('maxOutputBytes counts UTF-8 bytes, not characters, on stdout and stderr', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const answer = '€'.repeat(100)
+  const emoji = await fakeHarness(home, 'emoji.cjs', `process.stderr.write('🚀'.repeat(5000))\nconsole.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: ${JSON.stringify(answer)} }))`)
+  const fits = await runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: emoji, ctx, maxOutputBytes: 400 })
+  assert.equal(fits.text, answer)
+  assert.ok(Buffer.byteLength(fits.stderr) <= 400 && fits.stderr.length > 0)
+  assert.match(fits.stderr, /^(🚀)+$/u)
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: emoji, ctx, maxOutputBytes: 250 }), failure('FAILED', /more than 250 bytes on stdout/))
+})
+
+test('a timeout is reported as TIMEOUT even when output keeps flowing past maxOutputBytes', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const stubborn = await fakeHarness(home, 'stubborn.cjs', `process.on('SIGTERM', () => { process.stdout.write('y'.repeat(200000)); setTimeout(() => process.exit(0), 50) })\nprocess.stdout.write('x')\nsetInterval(() => {}, 1000)`)
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: stubborn, ctx: sandbox(home), timeoutMs: 300, maxOutputBytes: 1000 }), failure('TIMEOUT'))
 })
