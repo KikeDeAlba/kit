@@ -61,7 +61,7 @@ export function fakeAgy(homes: { antigravity: string }, options: { validate?: Er
       if (verb !== 'plugin') throw new Error(`unknown agy command ${args.join(' ')}`)
       if (action === 'list') {
         const names = await readdir(plugins).catch(() => [] as string[])
-        return JSON.stringify(names.map((name) => ({ name, path: path.join(plugins, name) })))
+        return JSON.stringify(names.map((name) => ({ name, enabled: true, version: '0.0.0', source: 'local', path: path.join(plugins, name), skills: [], agents: [], rules: [] })))
       }
       if (action === 'validate') {
         if (options.validate) throw options.validate

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { test } from 'node:test'
 import {
@@ -264,4 +264,74 @@ test('uninstalling gemini and antigravity together removes the shared memory blo
   const steps = await uninstallIntegration(integration, options)
   assert.deepEqual(steps.filter((step) => step.item === 'memory').map((step) => [step.agent, step.state]), [['gemini', 'skipped'], ['antigravity', 'removed']])
   assert.equal(await readFile(path.join(homes.gemini, 'GEMINI.md'), 'utf8'), '')
+})
+
+test('tool mapping covers every entry, drops unsupported tools and keeps a fixed order without duplicates', () => {
+  const table: Array<[string, string]> = [
+    ['Read', 'view_file, list_dir'],
+    ['Grep', 'grep_search'],
+    ['Glob', 'find_by_name'],
+    ['LS', 'list_dir'],
+    ['Bash', 'run_command'],
+    ['Edit', 'replace_file_content'],
+    ['MultiEdit', 'multi_replace_file_content'],
+    ['Write', 'write_to_file'],
+    ['WebFetch', 'read_url_content'],
+    ['WebSearch', 'search_web'],
+  ]
+  for (const [claude, expected] of table) {
+    assert.match(subagentForAntigravity(subagent(claude), 'x'), new RegExp(`\\ntools: \\[${expected}\\]\\n`))
+  }
+  const mixed = subagentForAntigravity(subagent('Skill, Agent, Task, NotebookEdit, TodoWrite, Unknown, WebSearch, Grep, LS, Read, Grep'), 'x')
+  assert.match(mixed, /\ntools: \[view_file, list_dir, grep_search, search_web\]\n/)
+  assert.doesNotMatch(mixed, /Skill|Agent|Task|NotebookEdit|TodoWrite|Unknown/)
+  assert.match(subagentForAntigravity(subagent('Read, Skill'), 'x'), /\ntools: \[view_file, list_dir\]\n/)
+  assert.doesNotMatch(subagentForAntigravity(subagent('Read, *'), 'x'), /tools:/)
+  assert.doesNotMatch(subagentForAntigravity(subagent(''), 'x'), /tools:/)
+  assert.throws(() => subagentForAntigravity(subagent('Skill, Unknown'), 'x'), /none of its tools/)
+  assert.throws(() => subagentForAntigravity(subagent('Agent'), 'x'), /none of its tools/)
+})
+
+test('the plugin tree holds real files and reinstalls when the rendered plugin differs from the installed one', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const agy = fakeAgy(homes)
+  const options = { agents: ['antigravity'] as const, ctx, homes, exec: agy.exec, locate: agy.locate }
+  await installIntegration(integration, options)
+  const root = path.join(dataHome(ctx), 'kikedealba', 'agents', 'antigravity', 'demo')
+  for (const file of ['plugin.json', 'agents/reviewer.md', 'skills/demo/SKILL.md', 'skills/demo/notes.txt', 'skills/demo-go/SKILL.md', 'rules/demo.md']) {
+    const stat = await lstat(path.join(root, file))
+    assert.ok(stat.isFile() && !stat.isSymbolicLink(), file)
+  }
+  assert.ok((await lstat(path.join(root, 'skills', 'demo'))).isDirectory())
+  assert.ok(!(await lstat(path.join(root, 'skills', 'demo'))).isSymbolicLink())
+
+  agy.calls.length = 0
+  const steps = await installIntegration({ ...integration, version: '1.2.4' }, options)
+  assert.equal(steps.find((step) => step.item === 'plugin')?.state, 'installed')
+  assert.deepEqual(agy.calls, ['plugin list --json', `plugin validate ${root} --strict --json`, `plugin install ${root}`])
+  assert.equal(JSON.parse(await readFile(path.join(homes.antigravity, 'plugins', 'demo', 'plugin.json'), 'utf8')).version, '1.2.4')
+})
+
+test('an integration without antigravity rules renders no rules directory', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const agy = fakeAgy(homes)
+  await installIntegration({ ...integration, antigravity: {} }, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.ok(!existsSync(path.join(homes.antigravity, 'plugins', 'demo', 'rules')))
+})
+
+test('an unreadable plugin list falls back to validate and install, and uninstall of an absent plugin is skipped', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const agy = fakeAgy(homes)
+  const exec: typeof agy.exec = async (command, args) => (args[1] === 'list' ? 'not json' : agy.exec(command, args))
+  const steps = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec, locate: agy.locate })
+  assert.equal(steps.find((step) => step.item === 'plugin')?.state, 'installed')
+  const removed = await uninstallIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: async (command, args) => (args[1] === 'list' ? JSON.stringify([]) : agy.exec(command, args)), locate: agy.locate })
+  assert.equal(removed.find((step) => step.item === 'plugin')?.state, 'skipped')
+  assert.ok(!agy.calls.includes('plugin uninstall demo'))
 })
