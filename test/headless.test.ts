@@ -429,3 +429,31 @@ test('unset removes variables without regard to case on Windows', async (t) => {
     assert.equal(windows.text, 'false')
   }
 })
+
+test('claude tools replace the default read set and an empty list leaves no tools at all', () => {
+  const base = { prompt: 'p', cwd: '/work' }
+  const strictEmpty = ['--strict-mcp-config', '--tools', 'Read,Grep,Glob', '--disallowedTools', 'Read,Grep,Glob']
+  assert.deepEqual(headlessInvocation('claude', { ...base, tools: [] }).args, ['-p', '--output-format', 'json', ...strictEmpty, '--permission-mode', 'plan', '--setting-sources', 'user'])
+  assert.deepEqual(headlessInvocation('claude', { ...base, tools: [' ', ''], access: 'write' }).args, ['-p', '--output-format', 'json', ...strictEmpty, '--permission-mode', 'acceptEdits'])
+  const read = headlessInvocation('claude', { ...base, tools: ['Read'] }).args
+  assert.deepEqual(read, ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', 'Read', '--permission-mode', 'plan', '--setting-sources', 'user'])
+  assert.equal(read.filter((arg) => arg === '--tools').length, 1)
+  assert.deepEqual(headlessInvocation('claude', { ...base, tools: ['Read', 'Write'], access: 'write' }).args, ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', 'Read,Write', '--permission-mode', 'acceptEdits'])
+  assert.deepEqual(headlessInvocation('claude', { ...base, access: 'write' }).args, ['-p', '--output-format', 'json', '--permission-mode', 'acceptEdits'])
+  for (const agent of ['codex', 'gemini', 'antigravity', 'opencode'] as HeadlessAgent[]) {
+    assert.deepEqual(headlessInvocation(agent, { ...base, tools: ['Read'] }), headlessInvocation(agent, base), agent)
+  }
+})
+
+test('runHeadless stops a harness that prints more than maxOutputBytes', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const flood = await fakeHarness(home, 'flood.cjs', `const line = 'x'.repeat(65536) + '\\n'\nconst write = () => { while (process.stdout.write(line)) {} process.stdout.once('drain', write) }\nwrite()\nsetTimeout(() => {}, 60000)`)
+  const started = Date.now()
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: flood, ctx, maxOutputBytes: 1024 * 1024, timeoutMs: 30000 }), failure('FAILED', /more than 1048576 bytes on stdout/))
+  assert.ok(Date.now() - started < 20000)
+  assert.deepEqual(liveHeadlessGroups(), [])
+  const small = await fakeHarness(home, 'small.cjs', `console.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: 'ok' }))`)
+  assert.equal((await runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: small, ctx, maxOutputBytes: 200 })).text, 'ok')
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: small, ctx, maxOutputBytes: 10 }), failure('FAILED', /more than 10 bytes/))
+})
