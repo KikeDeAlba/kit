@@ -1,0 +1,3 @@
+{"type":"step_start","timestamp":1792726831538,"sessionID":"ses_e99277354ffeVY91vRD90IQUTu","part":{"id":"prt_166d891b20010o7GHJqn0EbJAs","sessionID":"ses_e99277354ffeVY91vRD90IQUTu","messageID":"msg_166d88d230014XM3pHYKTLL7O1","type":"step-start"}}
+{"type":"text","timestamp":1792726831778,"sessionID":"ses_e99277354ffeVY91vRD90IQUTu","part":{"id":"prt_166d88d230014XM3pHYKTLL7O1_text-0","sessionID":"ses_e99277354ffeVY91vRD90IQUTu","messageID":"msg_166d88d230014XM3pHYKTLL7O1","type":"text","text":"OK","time":{"start":1792726830377,"end":1792726831778}}}
+{"type":"text","timestamp":1792726831900,"sessionID":"ses_e99277354ffeVY91vRD90IQUTu","part":{"id":"prt_second","sessionID":"ses_e99277354ffeVY91vRD90IQUTu","messageID":"msg_second","type":"text","text":"Second message."}}

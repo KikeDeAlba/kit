@@ -1,0 +1,8 @@
+Loaded cached credentials.
+{
+  "session_id": "b3c1d2e4-2222-4f00-8000-000000000003",
+  "response": "Hola {desde} gemini.\n{no es json}",
+  "stats": {
+    "models": {}
+  }
+}
