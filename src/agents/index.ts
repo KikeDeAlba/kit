@@ -691,8 +691,12 @@ function canonicalMcpEntry(value: unknown): string {
   return JSON.stringify(Object.fromEntries(kept.sort(([a], [b]) => a.localeCompare(b))))
 }
 
-function ownsMcpEntry(value: unknown, tool: string): boolean {
-  return typeof value === 'object' && value !== null && (value as Record<string, unknown>)[ANTIGRAVITY_MCP_MARKER] === tool
+function ownsMcpEntry(value: unknown, tool: string, wanted?: Record<string, unknown>): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record[ANTIGRAVITY_MCP_MARKER] === tool) return true
+  if (record[ANTIGRAVITY_MCP_MARKER] !== undefined || !wanted) return false
+  return canonicalMcpEntry({ ...record, [ANTIGRAVITY_MCP_MARKER]: tool }) === canonicalMcpEntry(wanted)
 }
 
 async function editAntigravityMcp(servers: readonly McpServer[], homes: AgentHomes, tool: string, mode: 'install' | 'remove'): Promise<Step> {
@@ -710,7 +714,8 @@ async function editAntigravityMcp(servers: readonly McpServer[], homes: AgentHom
   let changed = false
   for (const server of servers) {
     const existing = current[server.name]
-    if (existing !== undefined && !ownsMcpEntry(existing, tool)) {
+    const wanted = antigravityMcpEntry(server, tool)
+    if (existing !== undefined && !ownsMcpEntry(existing, tool, wanted)) {
       if (mode === 'install') foreign.push(server.name)
       continue
     }
@@ -721,8 +726,7 @@ async function editAntigravityMcp(servers: readonly McpServer[], homes: AgentHom
       }
       continue
     }
-    const wanted = antigravityMcpEntry(server, tool)
-    if (existing !== undefined && canonicalMcpEntry(existing) === canonicalMcpEntry(wanted)) continue
+    if (existing !== undefined && canonicalMcpEntry(existing) === canonicalMcpEntry(wanted) && ownsMcpEntry(existing, tool)) continue
     next[server.name] = wanted
     changed = true
   }
