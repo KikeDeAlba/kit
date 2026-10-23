@@ -237,10 +237,14 @@ async function uninstallMemory(integration: AgentIntegration, agent: MemoryAgent
   const others = AGENTS.filter((other): other is MemoryAgent => other !== agent && other !== 'claude-desktop')
   const owner = others.find((other) => path.resolve(memoryFile(other, homes)) === path.resolve(file) && memoryOwnerInstalled(other, integration.tool, homes))
   if (owner) return { agent, item: 'memory', state: 'skipped', detail: `memory block in ${file} still used by ${owner}`, path: file }
-  const current = existsSync(file) ? await readFile(file, 'utf8') : ''
-  const stripped = removeMemoryBlock(current, integration.tool)
-  if (stripped.removed) await writeFile(file, stripped.text)
-  return { agent, item: 'memory', state: stripped.removed ? 'removed' : 'skipped', detail: stripped.removed ? `removed memory block from ${file}` : `no memory block in ${file}`, path: file }
+  try {
+    const current = existsSync(file) ? await readFile(file, 'utf8') : ''
+    const stripped = removeMemoryBlock(current, integration.tool)
+    if (stripped.removed) await writeFile(file, stripped.text)
+    return { agent, item: 'memory', state: stripped.removed ? 'removed' : 'skipped', detail: stripped.removed ? `removed memory block from ${file}` : `no memory block in ${file}`, path: file }
+  } catch (error) {
+    return { agent, item: 'memory', state: 'failed', detail: reason(error), path: file }
+  }
 }
 
 function pushed(steps: Step[], step: Step | null): void {
@@ -736,83 +740,87 @@ export async function uninstallIntegration(integration: AgentIntegration, option
     path: where,
   })
   for (const agent of agents) {
-    if (agent === 'claude') {
-      for (const subagent of integration.subagents ?? []) {
-        const where = path.join(homes.claude, 'agents', `${subagent.name}.md`)
-        steps.push(removed(agent, `subagent ${subagent.name}`, await removeOwnedLink(where), where))
-      }
-    }
-    if (agent === 'opencode' || agent === 'codex') {
-      for (const subagent of integration.subagents ?? []) {
-        const where = agent === 'opencode' ? path.join(homes.opencode, 'agents', `${subagent.name}.md`) : path.join(homes.codex, 'agents', `${subagent.name}.toml`)
-        const ok = existsSync(where)
-        await rm(where, { force: true })
-        steps.push(removed(agent, `subagent ${subagent.name}`, ok, where))
-      }
-    }
-    if (agent === 'claude' || agent === 'opencode') {
-      const base = agent === 'claude' ? homes.claude : homes.opencode
-      for (const skill of integration.skills ?? []) {
-        const where = path.join(base, 'skills', skill.name)
-        steps.push(removed(agent, `skill ${skill.name}`, await removeOwnedLink(where), where))
-      }
-      for (const command of agent === 'claude' ? integration.commands ?? [] : markdownCommands(integration)) {
-        const where = path.join(base, 'commands', `${command.name}.md`)
-        steps.push(removed(agent, `command ${command.name}`, await removeOwnedLink(where), where))
-      }
-    }
-    if (agent === 'claude') {
-      const file = path.join(homes.claude, 'settings.json')
-      const loaded = await readJsonFile(file)
-      if (!('error' in loaded) && loaded.existed) {
-        stripClaudeSettings(integration, loaded.value)
-        await writeJsonFile(file, loaded.value, true)
-        steps.push({ agent, item: 'settings', state: 'removed', detail: `cleaned ${file}`, path: file })
-      }
-      const claude = await locator(options, ctx)('claude')
-      for (const server of integration.mcp ?? []) {
-        if (!claude) continue
-        const ok = await (options.exec ?? defaultExec)(claude, ['mcp', 'remove', '--scope', 'user', server.name]).then(() => true, () => false)
-        steps.push({ agent, item: `mcp ${server.name}`, state: ok ? 'removed' : 'skipped', detail: ok ? 'removed from Claude Code' : 'not registered' })
-      }
-    }
-    if (agent === 'opencode') {
-      for (const plugin of integration.opencode?.plugins ?? []) {
-        const where = path.join(homes.opencode, 'plugins', `${plugin.name}${path.extname(plugin.file)}`)
-        steps.push(removed(agent, `plugin ${plugin.name}`, await removeOwnedLink(where), where))
-      }
-      if ((integration.mcp ?? []).length > 0) steps.push(await editOpenCodeMcp(integration.mcp ?? [], homes, 'remove'))
-    }
-    if (agent === 'codex') {
-      for (const skill of integration.skills ?? []) {
-        const where = path.join(homes.agentsSkills, skill.name)
-        steps.push(removed(agent, `skill ${skill.name}`, await removeOwnedLink(where), where))
-      }
-      for (const command of markdownCommands(integration)) {
-        const where = path.join(homes.codex, 'prompts', `${command.name}.md`)
-        const ok = existsSync(where)
-        await rm(where, { force: true })
-        steps.push(removed(agent, `command ${command.name}`, ok, where))
-      }
-      if (integration.codex?.hooks) {
-        const file = path.join(homes.codex, 'hooks.json')
-        const loaded = await readJsonFile(file)
-        if (!('error' in loaded) && loaded.existed) {
-          await writeJsonFile(file, { ...loaded.value, hooks: stripHooks(loaded.value['hooks'], integration.codex.hooks).hooks }, true)
-          steps.push({ agent, item: 'hooks', state: 'removed', detail: `cleaned ${file}`, path: file })
+    try {
+      if (agent === 'claude') {
+        for (const subagent of integration.subagents ?? []) {
+          const where = path.join(homes.claude, 'agents', `${subagent.name}.md`)
+          steps.push(removed(agent, `subagent ${subagent.name}`, await removeOwnedLink(where), where))
         }
       }
-      for (const server of integration.mcp ?? []) steps.push(await editCodexMcp(server, homes, 'remove'))
+      if (agent === 'opencode' || agent === 'codex') {
+        for (const subagent of integration.subagents ?? []) {
+          const where = agent === 'opencode' ? path.join(homes.opencode, 'agents', `${subagent.name}.md`) : path.join(homes.codex, 'agents', `${subagent.name}.toml`)
+          const ok = existsSync(where)
+          await rm(where, { force: true })
+          steps.push(removed(agent, `subagent ${subagent.name}`, ok, where))
+        }
+      }
+      if (agent === 'claude' || agent === 'opencode') {
+        const base = agent === 'claude' ? homes.claude : homes.opencode
+        for (const skill of integration.skills ?? []) {
+          const where = path.join(base, 'skills', skill.name)
+          steps.push(removed(agent, `skill ${skill.name}`, await removeOwnedLink(where), where))
+        }
+        for (const command of agent === 'claude' ? integration.commands ?? [] : markdownCommands(integration)) {
+          const where = path.join(base, 'commands', `${command.name}.md`)
+          steps.push(removed(agent, `command ${command.name}`, await removeOwnedLink(where), where))
+        }
+      }
+      if (agent === 'claude') {
+        const file = path.join(homes.claude, 'settings.json')
+        const loaded = await readJsonFile(file)
+        if (!('error' in loaded) && loaded.existed) {
+          stripClaudeSettings(integration, loaded.value)
+          await writeJsonFile(file, loaded.value, true)
+          steps.push({ agent, item: 'settings', state: 'removed', detail: `cleaned ${file}`, path: file })
+        }
+        const claude = await locator(options, ctx)('claude')
+        for (const server of integration.mcp ?? []) {
+          if (!claude) continue
+          const ok = await (options.exec ?? defaultExec)(claude, ['mcp', 'remove', '--scope', 'user', server.name]).then(() => true, () => false)
+          steps.push({ agent, item: `mcp ${server.name}`, state: ok ? 'removed' : 'skipped', detail: ok ? 'removed from Claude Code' : 'not registered' })
+        }
+      }
+      if (agent === 'opencode') {
+        for (const plugin of integration.opencode?.plugins ?? []) {
+          const where = path.join(homes.opencode, 'plugins', `${plugin.name}${path.extname(plugin.file)}`)
+          steps.push(removed(agent, `plugin ${plugin.name}`, await removeOwnedLink(where), where))
+        }
+        if ((integration.mcp ?? []).length > 0) steps.push(await editOpenCodeMcp(integration.mcp ?? [], homes, 'remove'))
+      }
+      if (agent === 'codex') {
+        for (const skill of integration.skills ?? []) {
+          const where = path.join(homes.agentsSkills, skill.name)
+          steps.push(removed(agent, `skill ${skill.name}`, await removeOwnedLink(where), where))
+        }
+        for (const command of markdownCommands(integration)) {
+          const where = path.join(homes.codex, 'prompts', `${command.name}.md`)
+          const ok = existsSync(where)
+          await rm(where, { force: true })
+          steps.push(removed(agent, `command ${command.name}`, ok, where))
+        }
+        if (integration.codex?.hooks) {
+          const file = path.join(homes.codex, 'hooks.json')
+          const loaded = await readJsonFile(file)
+          if (!('error' in loaded) && loaded.existed) {
+            await writeJsonFile(file, { ...loaded.value, hooks: stripHooks(loaded.value['hooks'], integration.codex.hooks).hooks }, true)
+            steps.push({ agent, item: 'hooks', state: 'removed', detail: `cleaned ${file}`, path: file })
+          }
+        }
+        for (const server of integration.mcp ?? []) steps.push(await editCodexMcp(server, homes, 'remove'))
+      }
+      if (agent === 'gemini') {
+        const root = geminiExtensionDir(homes, integration.tool)
+        const ok = existsSync(root)
+        await rm(root, { recursive: true, force: true })
+        steps.push(removed(agent, 'extension', ok, root))
+      }
+      if (agent === 'antigravity') steps.push(await uninstallAntigravityPlugin(integration, options, ctx))
+      if (agent === 'claude-desktop') steps.push(await editClaudeDesktopMcp(integration, homes, options, ctx, 'remove'))
+    } catch (error) {
+      steps.push({ agent, item: 'integration', state: 'failed', detail: reason(error) })
     }
-    if (agent === 'gemini') {
-      const root = geminiExtensionDir(homes, integration.tool)
-      const ok = existsSync(root)
-      await rm(root, { recursive: true, force: true })
-      steps.push(removed(agent, 'extension', ok, root))
-    }
-    if (agent === 'antigravity') steps.push(await uninstallAntigravityPlugin(integration, options, ctx))
-    if (agent === 'claude-desktop') steps.push(await editClaudeDesktopMcp(integration, homes, options, ctx, 'remove'))
-    else pushed(steps, await uninstallMemory(integration, agent, homes))
+    if (agent !== 'claude-desktop') pushed(steps, await uninstallMemory(integration, agent, homes))
   }
   for (const agent of AGENTS) await rm(renderedRoot(ctx, integration.tool, agent), { recursive: true, force: true })
   return steps
