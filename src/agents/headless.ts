@@ -179,7 +179,11 @@ export function headlessInvocation(
     }
   }
   if (agent === 'antigravity') {
-    return { args: [`--print=${options.prompt}`, '--output-format', 'json', ...model('--model'), ...(write ? ['--dangerously-skip-permissions'] : ['--mode', 'plan']), ...extra], env: {} }
+    return {
+      args: ['--input-format', 'stream-json', '--output-format', 'stream-json', ...model('--model'), ...(write ? ['--dangerously-skip-permissions'] : ['--mode', 'plan']), ...extra, '-p='],
+      stdin: `${JSON.stringify({ event: 'user', message: { content: options.prompt } })}\n`,
+      env: {},
+    }
   }
   return { args: ['run', '--format', 'json', ...(write ? [] : ['--agent', 'plan']), ...model('-m'), ...extra], stdin, env: {} }
 }
@@ -303,13 +307,29 @@ function antigravityFailure(payload: Record<string, unknown>): string | undefine
   return undefined
 }
 
+function parseAntigravity(stdout: string): { text: string; sessionId?: string } {
+  let sessionId: string | undefined
+  let payload: Record<string, unknown> | null = null
+  for (const event of jsonLines(stdout)) {
+    sessionId = text(event['conversation_id']) || sessionId
+    if (event['event'] === 'result') payload = asRecord(event['result']) ?? payload
+  }
+  if (!payload) throw new HeadlessError('PARSE', 'antigravity', 'antigravity printed no result event', { stdout })
+  sessionId = text(payload['conversation_id']) || sessionId
+  const problem = antigravityFailure(payload)
+  if (problem !== undefined) throw new HeadlessError('FAILED', 'antigravity', `antigravity reported an error: ${problem}`, { stdout })
+  const answer = text(payload['response'])
+  if (answer === undefined) throw new HeadlessError('PARSE', 'antigravity', 'antigravity result has no "response" field', { stdout })
+  return sessionId ? { text: answer, sessionId } : { text: answer }
+}
+
 export function parseHeadlessOutput(agent: HeadlessAgent, stdout: string): { text: string; sessionId?: string } {
   if (!isHeadlessAgent(agent)) throw new HeadlessError('UNAVAILABLE', agent, `${String(agent)} is not a headless agent`, { stdout })
   if (agent === 'claude') {
     return parseSingle(agent, stdout, 'result', 'session_id', (payload) => (payload['is_error'] === true ? (text(payload['result']) ?? text(payload['subtype']) ?? 'error') : undefined))
   }
   if (agent === 'gemini') return parseSingle(agent, stdout, 'response', 'session_id', (payload) => (payload['error'] !== undefined && payload['response'] === undefined ? errorMessage(payload['error']) : undefined))
-  if (agent === 'antigravity') return parseSingle(agent, stdout, 'response', 'conversation_id', antigravityFailure)
+  if (agent === 'antigravity') return parseAntigravity(stdout)
   if (agent === 'codex') return parseCodex(stdout)
   return parseOpenCode(stdout)
 }
