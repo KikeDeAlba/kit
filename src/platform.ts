@@ -125,7 +125,6 @@ function isExecutableSync(file: string, ctx: PlatformContext): boolean {
 
 function whichCandidates(command: string, ctx: PlatformContext, extraDirs: readonly string[], trailingDirs: readonly string[]): string[] {
   const p = pathApi(ctx)
-  if (p.isAbsolute(command)) return executableNames(command, ctx)
   return searchPath(ctx, extraDirs, trailingDirs)
     .split(pathDelimiter(ctx))
     .flatMap((dir) => executableNames(command, ctx).map((name) => p.join(dir, name)))
@@ -167,10 +166,16 @@ function quoteForCmd(arg: string): string {
   return quoted.replace(CMD_META, '^^^$1')
 }
 
+export function windowsSystemCommand(name: string, ctx: PlatformContext = platformContext()): string {
+  const root = ctx.env['SystemRoot'] ?? ctx.env['SYSTEMROOT'] ?? ctx.env['windir'] ?? ctx.env['WINDIR'] ?? 'C:\\Windows'
+  return path.win32.join(root, 'System32', name)
+}
+
 export function spawnSpec(command: string, args: readonly string[], ctx: PlatformContext = platformContext()): SpawnSpec {
   if (ctx.platform !== 'win32' || !/\.(cmd|bat)$/i.test(command)) return { command, args: [...args], windowsVerbatimArguments: false }
+  if (args.some((arg) => /[\r\n]/.test(arg))) throw new Error(`cannot pass line breaks to ${path.win32.basename(command)}: cmd.exe cuts the command line at the first one`)
   const line = [path.win32.normalize(command).replace(CMD_META, '^$1'), ...args.map(quoteForCmd)].join(' ')
-  const shell = ctx.env['ComSpec'] ?? ctx.env['COMSPEC'] ?? 'cmd.exe'
+  const shell = windowsSystemCommand('cmd.exe', ctx)
   return { command: shell, args: ['/d', '/s', '/c', `"${line}"`], windowsVerbatimArguments: true }
 }
 
@@ -262,11 +267,25 @@ function powershellText(value: string): string {
   return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(value, 'utf8').toString('base64')}'))`
 }
 
-export function notifyCommand(title: string, body: string, ctx: PlatformContext = platformContext()): { command: string; args: string[] } {
+export const NOTIFY_TITLE_LIMIT = 256
+export const NOTIFY_BODY_LIMIT = 2000
+
+function clip(value: string, limit: number): string {
+  const chars = Array.from(value)
+  return chars.length > limit ? chars.slice(0, limit).join('') : value
+}
+
+function escapeMarkup(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+export function notifyCommand(rawTitle: string, rawBody: string, ctx: PlatformContext = platformContext()): { command: string; args: string[] } {
+  const title = clip(rawTitle, NOTIFY_TITLE_LIMIT)
+  const body = clip(rawBody, NOTIFY_BODY_LIMIT)
   if (ctx.platform === 'darwin') {
     return {
       command: 'osascript',
-      args: ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run', title, body],
+      args: ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run', '--', title, body],
     }
   }
   if (ctx.platform === 'win32') {
@@ -278,9 +297,9 @@ export function notifyCommand(title: string, body: string, ctx: PlatformContext 
       `$texts.Item(1).AppendChild($template.CreateTextNode(${powershellText(body)})) > $null`,
       `[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${WINDOWS_TOAST_APP}').Show([Windows.UI.Notifications.ToastNotification]::new($template))`,
     ].join('\n')
-    return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')] }
+    return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')] }
   }
-  return { command: 'notify-send', args: ['--', title, body] }
+  return { command: 'notify-send', args: ['--', escapeMarkup(title), escapeMarkup(body)] }
 }
 
 export async function notify(title: string, body: string, options: { ctx?: PlatformContext; timeoutMs?: number } = {}): Promise<boolean> {
