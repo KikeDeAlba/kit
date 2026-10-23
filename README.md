@@ -106,20 +106,39 @@ una herramienta que responde a un evento no dispara otro en cadena.
 ### 4. Integración con agentes de código
 
 `agents.installIntegration` instala skills, comandos, subagentes, memoria global, hooks y servidores MCP en
-los agentes que encuentre: **Claude Code, opencode, Codex y Gemini CLI**, más
+los agentes que encuentre: **Claude Code, opencode, Codex, Gemini CLI y Antigravity CLI** (`agy`), más
 los servidores MCP de **Claude Desktop**.
 
-| | Claude Code | opencode | Codex | Gemini CLI |
-|---|---|---|---|---|
-| Skill | `~/.claude/skills/<n>` | `~/.config/opencode/skills/<n>` | `~/.agents/skills/<n>` | extensión `skills/<n>` |
-| Comandos | `~/.claude/commands/*.md` | `~/.config/opencode/commands/*.md` | `~/.codex/prompts/*.md` | extensión `commands/*.toml` |
-| Hooks | `settings.json` | plugin | `~/.codex/hooks.json` | extensión `hooks/hooks.json` |
-| MCP | `claude mcp add --scope user` | `opencode.json` | `config.toml` | `gemini-extension.json` |
-| Subagentes | `~/.claude/agents/<n>.md` | `~/.config/opencode/agents/<n>.md` | `~/.codex/agents/<n>.toml` | extensión `agents/<n>.md` |
-| Memoria | `~/.claude/CLAUDE.md` | `~/.config/opencode/AGENTS.md` | `~/.codex/AGENTS.md` | `~/.gemini/GEMINI.md` |
+| | Claude Code | opencode | Codex | Gemini CLI | Antigravity CLI |
+|---|---|---|---|---|---|
+| Skill | `~/.claude/skills/<n>` | `~/.config/opencode/skills/<n>` | `~/.agents/skills/<n>` | extensión `skills/<n>` | plugin `skills/<n>` |
+| Comandos | `~/.claude/commands/*.md` | `~/.config/opencode/commands/*.md` | `~/.codex/prompts/*.md` | extensión `commands/*.toml` | no soportado (`skipped`) |
+| Hooks | `settings.json` | plugin | `~/.codex/hooks.json` | extensión `hooks/hooks.json` | no soportado |
+| MCP | `claude mcp add --scope user` | `opencode.json` | `config.toml` | `gemini-extension.json` | no soportado (`skipped`) |
+| Subagentes | `~/.claude/agents/<n>.md` | `~/.config/opencode/agents/<n>.md` | `~/.codex/agents/<n>.toml` | extensión `agents/<n>.md` | plugin `agents/<n>.md` |
+| Memoria | `~/.claude/CLAUDE.md` | `~/.config/opencode/AGENTS.md` | `~/.codex/AGENTS.md` | `~/.gemini/GEMINI.md` | `~/.gemini/GEMINI.md` (mismo bloque que Gemini) |
 
 Para Gemini se escribe una extensión completa en
-`~/.gemini/extensions/<herramienta>/`.
+`~/.gemini/extensions/<herramienta>/`. Gemini se detecta por el binario `gemini` o
+por la carpeta `~/.gemini/extensions`; `~/.gemini` sola ya no basta porque
+Antigravity también la crea.
+
+Para Antigravity kit genera un plugin en
+`<XDG_DATA_HOME>/kikedealba/agents/antigravity/<herramienta>/` (se borra y se
+regenera en cada instalación) con `plugin.json`, `agents/`, `skills/` (de
+`skills` y `userSkills`, con el frontmatter reducido a `name` y `description`) y
+`rules/<herramienta>.md` si la integración trae `antigravity.rules` (se escribe con
+`trigger: always_on`). Luego lo instala con `agy`:
+
+1. `agy plugin list --json`; si ya está y su carpeta es idéntica, sale `present`.
+2. `agy plugin validate <raíz> --strict --json`; si falla, sale `failed` y no se
+   instala.
+3. `agy plugin install <raíz>`.
+
+Sin `agy` en el `PATH` el plugin se genera igual y el paso sale `unavailable` con
+el comando a correr. Antigravity se detecta por el binario `agy` o por
+`~/.gemini/config` (se cambia con `homes.antigravity`). Desinstalar corre
+`agy plugin uninstall <herramienta>`.
 
 #### Subagentes
 
@@ -128,13 +147,21 @@ Para Gemini se escribe una extensión completa en
 En Claude se enlazan tal cual (o renderizados si tienen bloques `::: agent`). En
 los demás agentes kit los convierte:
 
-| Campo | opencode | Codex | Gemini CLI |
-|---|---|---|---|
-| `description` | `description`, con `mode: subagent` | `description` | `description`, con `kind: local` |
-| `tools` | `permission` con `deny` para edit, bash, webfetch y websearch que no estén | `[features] shell_tool = false` si no hay `Bash` | `tools` con los nombres de Gemini |
-| `effort` | — | `model_reasoning_effort` (`max` pasa a `xhigh`) | — |
-| `maxTurns` | `steps` | — | `max_turns` |
-| cuerpo | cuerpo | `developer_instructions` | cuerpo |
+| Campo | opencode | Codex | Gemini CLI | Antigravity CLI |
+|---|---|---|---|---|
+| `description` | `description`, con `mode: subagent` | `description` | `description`, con `kind: local` | `description`, con `model: inherit` |
+| `tools` | `permission` con `deny` para edit, bash, webfetch y websearch que no estén | `[features] shell_tool = false` si no hay `Bash` | `tools` con los nombres de Gemini | `tools: [...]` con los nombres de Antigravity |
+| `effort` | — | `model_reasoning_effort` (`max` pasa a `xhigh`) | — | — |
+| `maxTurns` | `steps` | — | `max_turns` | — |
+| cuerpo | cuerpo | `developer_instructions` | cuerpo | cuerpo |
+
+En Antigravity `Read` pasa a `view_file` y `list_dir`, `Grep` a `grep_search`,
+`Glob` a `find_by_name`, `LS` a `list_dir`, `Bash` a `run_command`, `Edit` a
+`replace_file_content`, `MultiEdit` a `multi_replace_file_content`, `Write` a
+`write_to_file`, `WebFetch` a `read_url_content` y `WebSearch` a `search_web`. Lo
+demás (`Skill`, `Agent`, `Task`, `TodoWrite`...) se descarta. Si `tools` trae
+valores y ninguno existe en Antigravity, la conversión falla y el plugin no se
+instala.
 
 `model` solo se respeta en Claude. En los demás se hereda el modelo de la sesión,
 porque los alias de Claude no existen ahí.
@@ -146,6 +173,12 @@ global de cada agente, entre `<!-- kit:<herramienta>:begin -->` y
 `<!-- kit:<herramienta>:end -->`. Lo demás del archivo no se toca: instalar de nuevo
 reemplaza solo el bloque, y desinstalar lo quita. Antes de cambiar un archivo
 existente se deja una copia en `<archivo>.backup`. Admite bloques `::: agent`.
+
+Gemini y Antigravity comparten `~/.gemini/GEMINI.md`: los dos escriben el mismo
+bloque, renderizado como `gemini` (`renderMemory`), así que la segunda instalación
+sale `present`. Al desinstalar uno, el bloque se queda (`skipped`, "still used by")
+mientras el otro siga instalado; lo quita el último. `memoryFile(agent, homes)` da
+la ruta de la memoria de cada agente.
 
 Hay una sola skill por herramienta. Lo que aplica solo a algunos agentes va en
 bloques:
