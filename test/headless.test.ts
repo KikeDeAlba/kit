@@ -467,3 +467,46 @@ test('runHeadless keeps only the tail of stderr past maxOutputBytes and still su
   assert.ok(result.stderr.endsWith('LAST LINE\n'))
   assert.ok(!result.stderr.includes('\uFFFD'))
 })
+
+const agyDelta = (step: number, delta: string) => `${JSON.stringify({ event: 'step_update', step_update: { conversation_id: 'c', step_index: step, state: 'ACTIVE', step_type: 'agent_response', text_delta: delta } })}\n`
+
+test('antigravity streams: several results, ids from init, text deltas and error events', () => {
+  const init = '{"event":"init","conversation_id":"from-init","init":{}}\n'
+  assert.deepEqual(parseHeadlessOutput('antigravity', init + agyResult({ conversation_id: 'a', status: 'SUCCESS', response: 'first' }) + agyResult({ conversation_id: 'b', status: 'SUCCESS', response: 'second' })), { text: 'second', sessionId: 'b' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', init + agyResult({ conversation_id: '', status: 'SUCCESS', response: 'r' })), { text: 'r', sessionId: 'from-init' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', init + agyDelta(1, 'Hel') + agyDelta(1, 'lo') + agyDelta(3, 'again') + agyResult({ conversation_id: '', status: 'SUCCESS', response: '' })), { text: 'Hello\n\nagain', sessionId: 'from-init' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', agyDelta(1, 'old') + agyResult({ status: 'SUCCESS', response: 'one' }) + agyDelta(1, 'two') + agyResult({ status: 'SUCCESS', response: '' })), { text: 'two' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', init + agyDelta(1, 'partial ') + agyDelta(1, 'answer')), { text: 'partial answer', sessionId: 'from-init' })
+  assert.throws(() => parseHeadlessOutput('antigravity', init + agyDelta(1, 'partial') + '{"event":"error","error":{"message":"stream broke"}}\n'), failure('FAILED', /stream broke/))
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"event":"error","message":"quota exceeded"}\n'), failure('FAILED', /quota exceeded/))
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"event":"error","message":"late"}\n' + agyResult({ status: 'SUCCESS', response: '' })), failure('FAILED', /late/))
+  assert.deepEqual(parseHeadlessOutput('antigravity', '{"event":"error","message":"tool hiccup"}\n' + agyResult({ status: 'SUCCESS', response: 'fine', conversation_id: 'c' })), { text: 'fine', sessionId: 'c' })
+})
+
+test('runHeadless returns partial agy deltas only when the process exits cleanly', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const lines = JSON.stringify(agyDelta(1, 'partial') + agyDelta(1, ' text'))
+  const clean = await fakeHarness(home, 'clean.cjs', `process.stdin.resume().on('end', () => process.stdout.write(${lines}))`)
+  assert.equal((await runHeadless({ agent: 'antigravity', prompt: 'x', cwd: home, bin: clean, ctx })).text, 'partial text')
+  const crash = await fakeHarness(home, 'crash.cjs', `process.stdin.resume().on('end', () => { process.stdout.write(${lines}); process.exitCode = 3 })`)
+  await assert.rejects(runHeadless({ agent: 'antigravity', prompt: 'x', cwd: home, bin: crash, ctx }), failure('FAILED', /exited with 3/))
+})
+
+test('maxOutputBytes counts UTF-8 bytes, not characters, on stdout and stderr', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const answer = '€'.repeat(100)
+  const emoji = await fakeHarness(home, 'emoji.cjs', `process.stderr.write('🚀'.repeat(5000))\nconsole.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: ${JSON.stringify(answer)} }))`)
+  const fits = await runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: emoji, ctx, maxOutputBytes: 400 })
+  assert.equal(fits.text, answer)
+  assert.ok(Buffer.byteLength(fits.stderr) <= 400 && fits.stderr.length > 0)
+  assert.match(fits.stderr, /^(🚀)+$/u)
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: emoji, ctx, maxOutputBytes: 250 }), failure('FAILED', /more than 250 bytes on stdout/))
+})
+
+test('a timeout is reported as TIMEOUT even when output keeps flowing past maxOutputBytes', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const stubborn = await fakeHarness(home, 'stubborn.cjs', `process.on('SIGTERM', () => { process.stdout.write('y'.repeat(200000)); setTimeout(() => process.exit(0), 50) })\nprocess.stdout.write('x')\nsetInterval(() => {}, 1000)`)
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: stubborn, ctx: sandbox(home), timeoutMs: 300, maxOutputBytes: 1000 }), failure('TIMEOUT'))
+})

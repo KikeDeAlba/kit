@@ -321,17 +321,47 @@ function antigravityFailure(payload: Record<string, unknown>): string | undefine
 function parseAntigravity(stdout: string): { text: string; sessionId?: string } {
   let sessionId: string | undefined
   let payload: Record<string, unknown> | null = null
+  let failure: string | undefined
+  let deltas: { step: unknown; text: string }[] = []
   for (const event of jsonLines(stdout)) {
     sessionId = text(event['conversation_id']) || sessionId
-    if (event['event'] === 'result') payload = asRecord(event['result']) ?? payload
+    const kind = event['event']
+    if (kind === 'result') {
+      const result = asRecord(event['result'])
+      if (!result) continue
+      if (!text(result['response'])?.trim() && deltas.length > 0) payload = { ...result, response: joinDeltas(deltas) }
+      else payload = result
+      deltas = []
+    } else if (kind === 'error') {
+      failure = errorMessage(event['error']) ?? errorMessage(event['message']) ?? JSON.stringify(event)
+    } else if (kind === 'step_update') {
+      const step = asRecord(event['step_update'])
+      const delta = text(step?.['text_delta'])
+      if (step?.['step_type'] === 'agent_response' && delta) deltas.push({ step: step['step_index'], text: delta })
+    }
   }
-  if (!payload) throw new HeadlessError('PARSE', 'antigravity', 'antigravity printed no result event', { stdout })
+  if (!payload && deltas.length > 0 && failure === undefined) payload = { response: joinDeltas(deltas) }
+  if (!payload) {
+    if (failure !== undefined) throw new HeadlessError('FAILED', 'antigravity', `antigravity reported an error: ${failure}`, { stdout })
+    throw new HeadlessError('PARSE', 'antigravity', 'antigravity printed no result event', { stdout })
+  }
   sessionId = text(payload['conversation_id']) || sessionId
-  const problem = antigravityFailure(payload)
+  const problem = antigravityFailure(payload) ?? (failure !== undefined && !text(payload['response'])?.trim() ? failure : undefined)
   if (problem !== undefined) throw new HeadlessError('FAILED', 'antigravity', `antigravity reported an error: ${problem}`, { stdout })
   const answer = text(payload['response'])
   if (answer === undefined) throw new HeadlessError('PARSE', 'antigravity', 'antigravity result has no "response" field', { stdout })
   return sessionId ? { text: answer, sessionId } : { text: answer }
+}
+
+function joinDeltas(deltas: readonly { step: unknown; text: string }[]): string {
+  let answer = ''
+  let previous: unknown = deltas[0]?.step
+  for (const delta of deltas) {
+    if (delta.step !== previous && answer.length > 0) answer += '\n\n'
+    answer += delta.text
+    previous = delta.step
+  }
+  return answer
 }
 
 export function parseHeadlessOutput(agent: HeadlessAgent, stdout: string): { text: string; sessionId?: string } {
@@ -431,12 +461,11 @@ function killTree(child: ChildProcess, ctx: PlatformContext): void {
   }, 3000).unref()
 }
 
-function tailBytes(value: string, limit: number): string {
-  const bytes = Buffer.from(value)
-  if (bytes.length <= limit) return value
+function tailBuffer(bytes: Buffer, limit: number): Buffer {
+  if (bytes.length <= limit) return bytes
   let start = bytes.length - limit
   while (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start++
-  return bytes.subarray(start).toString('utf8')
+  return bytes.subarray(start)
 }
 
 function stderrSummary(stderr: string): string {
@@ -480,10 +509,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
       windowsVerbatimArguments: spec.windowsVerbatimArguments,
       detached: ctx.platform !== 'win32',
     })
-    let stdout = ''
-    let stderr = ''
+    const stdoutChunks: Buffer[] = []
+    let stderrChunks: Buffer[] = []
     let reason: 'timeout' | 'aborted' | 'overflow' | null = null
     let stdoutBytes = 0
+    let stderrBytes = 0
     const maxOutputBytes = options.maxOutputBytes ?? HEADLESS_DEFAULT_MAX_OUTPUT_BYTES
     let settled = false
     const finish = (fn: () => void) => {
@@ -510,26 +540,33 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
     child.once('exit', () => {
       if (group !== undefined) untrackGroup(group)
     })
-    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => {
+    child.stdout?.on('data', (chunk: Buffer) => {
       if (reason === 'overflow') return
-      stdoutBytes += Buffer.byteLength(chunk)
-      if (stdoutBytes > maxOutputBytes) {
-        reason = 'overflow'
-        killTree(child, ctx)
-        return
+      if (reason === null) {
+        stdoutBytes += chunk.length
+        if (stdoutBytes > maxOutputBytes) {
+          reason = 'overflow'
+          killTree(child, ctx)
+          return
+        }
       }
-      stdout += chunk
+      stdoutChunks.push(chunk)
     })
-    child.stderr?.setEncoding('utf8').on('data', (chunk: string) => {
-      stderr += chunk
-      if (Buffer.byteLength(stderr) > maxOutputBytes) stderr = tailBytes(stderr, maxOutputBytes)
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrChunks.push(chunk)
+      stderrBytes += chunk.length
+      if (stderrBytes < 2 * maxOutputBytes) return
+      stderrChunks = [tailBuffer(Buffer.concat(stderrChunks), maxOutputBytes)]
+      stderrBytes = stderrChunks[0]?.length ?? 0
     })
+    const output = () => ({ stdout: Buffer.concat(stdoutChunks).toString('utf8'), stderr: tailBuffer(Buffer.concat(stderrChunks), maxOutputBytes).toString('utf8') })
     child.once('error', (error: NodeJS.ErrnoException) => {
       const code = error.code === 'E2BIG' ? 'PROMPT_TOO_LONG' : 'UNAVAILABLE'
-      finish(() => reject(new HeadlessError(code, agent, `could not start ${bin}: ${error.message}`, { stdout, stderr })))
+      finish(() => reject(new HeadlessError(code, agent, `could not start ${bin}: ${error.message}`, output())))
     })
     child.once('close', (code) => {
       finish(() => {
+        const { stdout, stderr } = output()
         const details = { exitCode: code, stdout, stderr }
         if (reason === 'timeout') return reject(new HeadlessError('TIMEOUT', agent, `${agent} did not finish within ${options.timeoutMs ?? HEADLESS_DEFAULT_TIMEOUT_MS} ms`, details))
         if (reason === 'aborted') return reject(new HeadlessError('FAILED', agent, `${agent} run was aborted`, details))

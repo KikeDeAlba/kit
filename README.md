@@ -204,7 +204,11 @@ recorta por su cuenta los mensajes de más de unos 190 KB (avisa con
 `extraArgs` va después de los flags de acceso (en agy, antes de `-p=`). En agy
 cuenta la respuesta: si `response` trae texto y `status` no es `ERROR`, la corrida es buena aunque traiga
 `error` o `denied_actions`. Sin texto útil, falla con `FAILED` y el mensaje sale
-de `error`, de `status` o de las acciones denegadas.
+de `error`, de `status` o de las acciones denegadas. Cuenta el último evento
+`result`; si su `response` viene vacío, se usan los `text_delta` de los pasos
+`agent_response` de ese turno. Si el stream acaba sin `result` pero con deltas y
+`agy` sale con 0, se devuelve ese texto parcial. Un evento `error` hace fallar
+con `FAILED` y su mensaje, salvo que el `result` traiga una respuesta útil.
 
 `tools` fija la lista exacta de herramientas de claude y reemplaza el
 `--tools Read,Grep,Glob` de lectura (claude suma los `--tools` repetidos, así que
