@@ -159,9 +159,13 @@ En Antigravity `Read` pasa a `view_file` y `list_dir`, `Grep` a `grep_search`,
 `Glob` a `find_by_name`, `LS` a `list_dir`, `Bash` a `run_command`, `Edit` a
 `replace_file_content`, `MultiEdit` a `multi_replace_file_content`, `Write` a
 `write_to_file`, `WebFetch` a `read_url_content` y `WebSearch` a `search_web`. Lo
-demás (`Skill`, `Agent`, `Task`, `TodoWrite`...) se descarta. Si `tools` trae
-valores y ninguno existe en Antigravity, la conversión falla y el plugin no se
-instala.
+demás (`Skill`, `Agent`, `Task`, `TodoWrite`...) se descarta. Si `tools` no
+viene, viene vacío o incluye `*`, se escribe la lista completa (`view_file`,
+`list_dir`, `grep_search`, `find_by_name`, `run_command`, `replace_file_content`,
+`multi_replace_file_content`, `write_to_file`, `read_url_content`, `search_web`),
+porque sin la clave `agy` deja al subagente sin escribir ni ejecutar. Si `tools`
+trae valores y ninguno existe en Antigravity, la conversión falla y el plugin no
+se instala.
 
 `model` solo se respeta en Claude. En los demás se hereda el modelo de la sesión,
 porque los alias de Claude no existen ahí.
