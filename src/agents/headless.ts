@@ -18,7 +18,9 @@ export interface HeadlessOptions {
   model?: string
   timeoutMs?: number
   access?: 'read' | 'write'
+  tools?: readonly string[]
   extraArgs?: readonly string[]
+  maxOutputBytes?: number
   env?: NodeJS.ProcessEnv
   bin?: string
   ctx?: PlatformContext
@@ -63,6 +65,8 @@ export interface HeadlessInvocation {
 }
 
 export const HEADLESS_DEFAULT_TIMEOUT_MS = 600_000
+export const HEADLESS_DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+export const CLAUDE_READ_TOOLS: readonly string[] = ['Read', 'Grep', 'Glob']
 export const WINDOWS_COMMAND_LINE_LIMIT = 8191
 
 export const HEADLESS_ENV_ALLOWLIST: readonly string[] = [
@@ -151,17 +155,24 @@ export function headlessEnvironment(agent: HeadlessAgent, base: NodeJS.ProcessEn
   return { ...headlessEnv(agent, { ...base, ...extra }), ...extra }
 }
 
+function claudeTools(tools: readonly string[] | undefined, write: boolean): string[] {
+  if (tools === undefined) return write ? [] : ['--tools', CLAUDE_READ_TOOLS.join(',')]
+  const names = tools.map((tool) => tool.trim()).filter((tool) => tool.length > 0)
+  if (names.length === 0) return ['--strict-mcp-config', '--tools', CLAUDE_READ_TOOLS.join(','), '--disallowedTools', CLAUDE_READ_TOOLS.join(',')]
+  return ['--strict-mcp-config', '--tools', names.join(',')]
+}
+
 export function headlessInvocation(
   agent: HeadlessAgent,
-  options: { prompt: string; cwd: string; model?: string; access?: 'read' | 'write'; extraArgs?: readonly string[] },
+  options: { prompt: string; cwd: string; model?: string; access?: 'read' | 'write'; tools?: readonly string[]; extraArgs?: readonly string[] },
 ): HeadlessInvocation {
   const write = options.access === 'write'
   const extra = [...(options.extraArgs ?? [])]
   const model = (flag: string) => (options.model ? [flag, options.model] : [])
   const stdin = options.prompt
   if (agent === 'claude') {
-    const access = write ? ['--permission-mode', 'acceptEdits'] : ['--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user']
-    return { args: ['-p', '--output-format', 'json', ...access, ...model('--model'), ...extra], stdin, env: {} }
+    const access = write ? ['--permission-mode', 'acceptEdits'] : ['--permission-mode', 'plan', '--setting-sources', 'user']
+    return { args: ['-p', '--output-format', 'json', ...claudeTools(options.tools, write), ...access, ...model('--model'), ...extra], stdin, env: {} }
   }
   if (agent === 'codex') {
     return {
@@ -463,7 +474,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
     })
     let stdout = ''
     let stderr = ''
-    let reason: 'timeout' | 'aborted' | null = null
+    let reason: 'timeout' | 'aborted' | 'overflow' | null = null
+    let stdoutBytes = 0
+    const maxOutputBytes = options.maxOutputBytes ?? HEADLESS_DEFAULT_MAX_OUTPUT_BYTES
     let settled = false
     const finish = (fn: () => void) => {
       if (settled) return
@@ -489,7 +502,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
     child.once('exit', () => {
       if (group !== undefined) untrackGroup(group)
     })
-    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk))
+    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => {
+      if (reason === 'overflow') return
+      stdoutBytes += Buffer.byteLength(chunk)
+      if (stdoutBytes > maxOutputBytes) {
+        reason = 'overflow'
+        killTree(child, ctx)
+        return
+      }
+      stdout += chunk
+    })
     child.stderr?.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk))
     child.once('error', (error: NodeJS.ErrnoException) => {
       const code = error.code === 'E2BIG' ? 'PROMPT_TOO_LONG' : 'UNAVAILABLE'
@@ -500,6 +522,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
         const details = { exitCode: code, stdout, stderr }
         if (reason === 'timeout') return reject(new HeadlessError('TIMEOUT', agent, `${agent} did not finish within ${options.timeoutMs ?? HEADLESS_DEFAULT_TIMEOUT_MS} ms`, details))
         if (reason === 'aborted') return reject(new HeadlessError('FAILED', agent, `${agent} run was aborted`, details))
+        if (reason === 'overflow') return reject(new HeadlessError('FAILED', agent, `${agent} printed more than ${maxOutputBytes} bytes on stdout and was stopped; raise maxOutputBytes if that much output is expected`, details))
         let parsed: { text: string; sessionId?: string }
         try {
           parsed = parseHeadlessOutput(agent, stdout)
