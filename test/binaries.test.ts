@@ -43,7 +43,7 @@ test('toolchain directories follow the Windows layout', () => {
   const dirs = toolchainSearchDirs(ctx)
   for (const dir of [
     'C:\\nvm4w\\nodejs',
-    'C:\\Users\\a\\AppData\\Roaming\\fnm\\aliases\\default',
+    'C:\\Users\\a\\AppData\\Local\\fnm\\aliases\\default',
     'C:\\Users\\a\\AppData\\Local\\pnpm',
     'C:\\Users\\a\\AppData\\Roaming\\npm',
     'C:\\Users\\a\\AppData\\Local\\Volta\\bin',
@@ -75,7 +75,9 @@ test('findAgentBinary walks PATH, then the toolchain, then agent-specific direct
   const override = await executable(path.join(home, 'custom', 'my-gemini'))
   assert.equal(await findAgentBinary('gemini', { ctx, override }), override)
   assert.equal(findAgentBinarySync('gemini', { ctx, override }), override)
-  assert.equal(await findAgentBinary('gemini', { ctx, override: path.join(home, 'nope') }), onPath)
+  assert.equal(await findAgentBinary('gemini', { ctx, override: path.join(home, 'nope') }), null)
+  assert.equal(findAgentBinarySync('gemini', { ctx, override: path.join(home, 'nope') }), null)
+  assert.equal(await findAgentBinary('nope' as never, { ctx }), null)
   assert.equal(await findAgentBinary('claude-desktop', { ctx }), null)
 })
 

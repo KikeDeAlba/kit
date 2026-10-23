@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { test } from 'node:test'
 import {
@@ -459,8 +459,8 @@ test('antigravity MCP servers merge into mcp_config.json and keep foreign entrie
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), {
     mcpServers: {
       other: { command: 'other', args: [], disabled: true },
-      demo: { command: 'demo', args: ['mcp', '--stdio'], env: { DEMO: '1' }, disabled: false },
-      'demo-remote': { serverUrl: 'https://example.test/mcp', headers: { Authorization: 'Bearer x' }, disabled: false },
+      demo: { command: 'demo', args: ['mcp', '--stdio'], env: { DEMO: '1' }, disabled: false, _kit: 'demo' },
+      'demo-remote': { serverUrl: 'https://example.test/mcp', headers: { Authorization: 'Bearer x' }, disabled: false, _kit: 'demo' },
     },
     extra: { keep: 1 },
   })
@@ -482,7 +482,7 @@ test('antigravity MCP handles an empty config file, skips invalid JSON and honor
   await writeFile(file, '')
   const agy = fakeAgy(homes)
   await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
-  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { mcpServers: { demo: { command: 'demo', args: ['mcp'], env: {}, disabled: false } } })
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { mcpServers: { demo: { command: 'demo', args: ['mcp'], disabled: false, _kit: 'demo' } } })
 
   await writeFile(file, '{ not json')
   const broken = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
@@ -507,4 +507,33 @@ test('removing the last antigravity MCP server leaves a valid mcp_config.json', 
   const again = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
   assert.equal(again.find((step) => step.item === 'mcp demo')?.state, 'installed')
   assert.deepEqual(Object.keys(JSON.parse(await readFile(file, 'utf8')).mcpServers), ['demo'])
+})
+
+test('antigravity MCP never overwrites a foreign entry with the same name and keeps the file mode', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const file = path.join(homes.antigravity, 'mcp_config.json')
+  const agy = fakeAgy(homes)
+  await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal((await stat(file)).mode & 0o777, 0o600)
+
+  await chmod(file, 0o640)
+  await writeFile(file, JSON.stringify({ mcpServers: { demo: { command: 'someone-else', disabled: false } } }))
+  const steps = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  const step = steps.find((entry) => entry.item === 'mcp demo')
+  assert.equal(step?.state, 'skipped')
+  assert.match(step?.detail ?? '', /conflict.*not managed by demo/)
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { mcpServers: { demo: { command: 'someone-else', disabled: false } } })
+  const removed = await uninstallIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(removed.find((entry) => entry.item === 'mcp demo')?.state, 'skipped')
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { mcpServers: { demo: { command: 'someone-else', disabled: false } } })
+
+  await writeFile(file, JSON.stringify({ mcpServers: { demo: { _kit: 'demo', args: ['mcp'], command: 'demo', disabled: false } } }))
+  const normalized = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(normalized.find((entry) => entry.item === 'mcp demo')?.state, 'present')
+  await writeFile(file, JSON.stringify({ mcpServers: { demo: { _kit: 'demo', command: 'old', disabled: false } } }))
+  const updated = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(updated.find((entry) => entry.item === 'mcp demo')?.state, 'installed')
+  assert.equal((await stat(file)).mode & 0o777, 0o640)
 })
