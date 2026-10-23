@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { test } from 'node:test'
-import { HeadlessError, headlessEnv, headlessEnvironment, headlessInvocation, isHeadlessAgent, parseHeadlessOutput, pickHeadlessAgent, runHeadless, type HeadlessAgent } from '../src/agents/index.ts'
+import { HeadlessError, liveHeadlessGroups, headlessEnv, headlessEnvironment, headlessInvocation, isHeadlessAgent, parseHeadlessOutput, pickHeadlessAgent, runHeadless, type HeadlessAgent } from '../src/agents/index.ts'
 import { platformContext } from '../src/platform.ts'
 import { sandbox, tempDir } from './helpers.ts'
 
@@ -69,7 +69,7 @@ test('each harness gets its own flags, sandbox and prompt channel', () => {
   assert.deepEqual(geminiWrite.args, ['-o', 'json', '--approval-mode', 'auto_edit'])
   assert.equal(geminiWrite.env['GEMINI_CLI_TRUST_WORKSPACE'], 'true')
   const agy = headlessInvocation('antigravity', base)
-  assert.deepEqual(agy.args, ['--print=- hello', '--output-format', 'json'])
+  assert.deepEqual(agy.args, ['--print=- hello', '--output-format', 'json', '--mode', 'plan'])
   assert.equal(agy.stdin, undefined)
   assert.deepEqual(headlessInvocation('antigravity', { ...base, access: 'write', model: 'm' }).args, ['--print=- hello', '--output-format', 'json', '--model', 'm', '--dangerously-skip-permissions'])
   const opencode = headlessInvocation('opencode', { ...base, model: 'anthropic/claude' })
@@ -324,4 +324,33 @@ test('headlessEnv keeps proxies and CAs and opens cloud credentials only when th
   assert.ok('GOOGLE_APPLICATION_CREDENTIALS' in headlessEnv('gemini', { ...base, GOOGLE_GENAI_USE_VERTEXAI: 'true' }))
   assert.ok(!('GOOGLE_APPLICATION_CREDENTIALS' in headlessEnv('gemini', { ...base, GOOGLE_GENAI_USE_VERTEXAI: 'false' })))
   assert.ok('HTTPS_PROXY' in headlessEnv('opencode', base) && !('OPENAI_API_KEY' in headlessEnv('opencode', base)))
+})
+
+test('live child groups are tracked for the exit handler and released when the child ends', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const slow = await fakeHarness(home, 'slow.cjs', `setTimeout(() => console.log(JSON.stringify({ result: 'ok' })), 300)`)
+  const listeners = process.listenerCount('exit')
+  const pids: number[] = []
+  const pending = runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: slow, ctx, onSpawn: (pid) => pids.push(pid) })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.deepEqual(liveHeadlessGroups(), pids)
+  assert.equal(process.listenerCount('exit'), listeners + 1)
+  assert.equal((await pending).text, 'ok')
+  assert.deepEqual(liveHeadlessGroups(), [])
+  assert.equal(process.listenerCount('exit'), listeners)
+})
+
+test('a parent that exits takes its headless children with it', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const slow = await fakeHarness(home, 'slow.cjs', `setInterval(() => {}, 1000)`)
+  const pidFile = path.join(home, 'pid')
+  const parent = path.join(home, 'parent.mts')
+  const source = path.join(import.meta.dirname, '..', 'src', 'agents', 'index.ts')
+  await writeFile(parent, `import { writeFileSync } from 'node:fs'\nimport { runHeadless } from ${JSON.stringify(source)}\nrunHeadless({ agent: 'claude', prompt: 'x', cwd: ${JSON.stringify(home)}, bin: ${JSON.stringify(slow)}, onSpawn: (pid) => { writeFileSync(${JSON.stringify(pidFile)}, String(pid)); setTimeout(() => process.exit(0), 200) } }).catch(() => {})\n`)
+  const { execFile } = await import('node:child_process')
+  await new Promise<void>((resolve, reject) => execFile(process.execPath, [parent], (error) => (error ? reject(error) : resolve())))
+  const pid = Number(await readFile(pidFile, 'utf8'))
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  assert.throws(() => process.kill(pid, 0))
 })

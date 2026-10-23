@@ -172,7 +172,7 @@ export function headlessInvocation(
     }
   }
   if (agent === 'antigravity') {
-    return { args: [`--print=${options.prompt}`, '--output-format', 'json', ...model('--model'), ...(write ? ['--dangerously-skip-permissions'] : []), ...extra], env: {} }
+    return { args: [`--print=${options.prompt}`, '--output-format', 'json', ...model('--model'), ...(write ? ['--dangerously-skip-permissions'] : ['--mode', 'plan']), ...extra], env: {} }
   }
   return { args: ['run', '--format', 'json', ...(write ? [] : ['--agent', 'plan']), ...model('-m'), ...extra], stdin, env: {} }
 }
@@ -319,6 +319,32 @@ function childEnv(agent: HeadlessAgent, bin: string, invocation: HeadlessInvocat
   return env
 }
 
+const liveGroups = new Set<number>()
+
+function killLiveGroups(): void {
+  for (const pid of liveGroups) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch {
+      continue
+    }
+  }
+}
+
+function trackGroup(pid: number): void {
+  if (liveGroups.size === 0) process.on('exit', killLiveGroups)
+  liveGroups.add(pid)
+}
+
+function untrackGroup(pid: number): void {
+  if (!liveGroups.delete(pid)) return
+  if (liveGroups.size === 0) process.off('exit', killLiveGroups)
+}
+
+export function liveHeadlessGroups(): number[] {
+  return [...liveGroups]
+}
+
 function killTree(child: ChildProcess, ctx: PlatformContext): void {
   if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return
   const pid = child.pid
@@ -402,8 +428,13 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
       killTree(child, ctx)
     }
     options.signal?.addEventListener('abort', onAbort, { once: true })
+    const group = ctx.platform !== 'win32' ? child.pid : undefined
     child.once('spawn', () => {
+      if (group !== undefined) trackGroup(group)
       if (child.pid !== undefined) options.onSpawn?.(child.pid)
+    })
+    child.once('exit', () => {
+      if (group !== undefined) untrackGroup(group)
     })
     child.stdout?.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk))
     child.stderr?.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk))

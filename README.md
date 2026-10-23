@@ -191,7 +191,7 @@ como `--print=<prompt>`, así un prompt que empieza con `-` no se toma como flag
 | claude | `claude -p --output-format json [--model m]` | `--tools Read,Grep,Glob --permission-mode plan --setting-sources user` | `--permission-mode acceptEdits` | `result`, `session_id` |
 | codex | `codex exec --json -C <cwd> --skip-git-repo-check [-m m] -` | `--sandbox read-only` | `--sandbox workspace-write` | último `item.completed` con `agent_message`; id en `thread.started` |
 | gemini | `gemini -o json [-m m]` | `--approval-mode plan`, sin `GEMINI_CLI_TRUST_WORKSPACE` | `--approval-mode auto_edit` y `GEMINI_CLI_TRUST_WORKSPACE=true` | `response`, `session_id` |
-| antigravity | `agy --print=<prompt> --output-format json [--model m]` | sin flags extra | `--dangerously-skip-permissions` | `response`, `conversation_id` |
+| antigravity | `agy --print=<prompt> --output-format json [--model m]` | `--mode plan` | `--dangerously-skip-permissions` | `response`, `conversation_id` |
 | opencode | `opencode run --format json [-m proveedor/modelo]` | `--agent plan` | agente por omisión | `part.text` de los eventos `text`, unidos; `sessionID` |
 
 `extraArgs` va después de los flags de acceso. Si `agy` deja `response` vacío y
@@ -227,7 +227,9 @@ principio del `PATH`.
 
 El tiempo límite por omisión es de 10 minutos. Al vencer, o al abortar con
 `signal`, se mata el árbol de procesos: en unix el hijo corre en su propio grupo
-y se manda `SIGTERM` y luego `SIGKILL` al grupo; en Windows se usa
+y se manda `SIGTERM` y luego `SIGKILL` al grupo, y si el proceso padre sale
+mientras hay hijos vivos, un manejador de `exit` mata sus grupos (`liveHeadlessGroups`
+los lista); en Windows se usa
 `%SystemRoot%\System32\taskkill.exe /T /F`.
 
 Los fallos lanzan `HeadlessError` con un `code`, además de `exitCode`, `stdout`
