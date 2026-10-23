@@ -206,6 +206,18 @@ cuenta la respuesta: si `response` trae texto y `status` no es `ERROR`, la corri
 `error` o `denied_actions`. Sin texto útil, falla con `FAILED` y el mensaje sale
 de `error`, de `status` o de las acciones denegadas.
 
+`tools` fija la lista exacta de herramientas de claude y reemplaza el
+`--tools Read,Grep,Glob` de lectura (claude suma los `--tools` repetidos, así que
+kit no manda el suyo). Va como `--strict-mcp-config --tools <a,b>`, de modo que
+tampoco se cargan los servidores MCP del usuario. Con `tools: []` no queda
+ninguna: kit manda `--strict-mcp-config --tools Read,Grep,Glob --disallowedTools
+Read,Grep,Glob`, que el evento `init` de claude reporta como `tools: []`. Los
+demás agentes ignoran `tools`. Sin `tools`, la lectura conserva `Read,Grep,Glob`
+y también los servidores MCP del usuario.
+
+`maxOutputBytes` (8 MiB por omisión, `HEADLESS_DEFAULT_MAX_OUTPUT_BYTES`) limita
+el stdout del hijo: si lo pasa, kit mata el árbol de procesos y lanza `FAILED`.
+
 El hijo no hereda todo el entorno. `headlessEnv(agent, env)` filtra con una lista
 blanca común, y bita, recap e inkwell pueden usarla para lo mismo:
 
@@ -255,7 +267,7 @@ y `stderr`:
 | `code` | Cuándo |
 |---|---|
 | `UNAVAILABLE` | No se encontró el binario o no se pudo lanzar. |
-| `FAILED` | Salió con código distinto de cero, el agente reportó un error en su JSON, se abortó, `cwd` no existe o el prompt trae saltos de línea y debe ir como argumento a un `.cmd`. |
+| `FAILED` | Salió con código distinto de cero, el agente reportó un error en su JSON, se abortó, su stdout pasó de `maxOutputBytes`, `cwd` no existe o el prompt trae saltos de línea y debe ir como argumento a un `.cmd`. |
 | `TIMEOUT` | Se venció `timeoutMs`. |
 | `PARSE` | Salió bien pero su salida no trae la respuesta. |
 | `PROMPT_TOO_LONG` | El sistema rechazó la línea de comandos (`E2BIG`), o en Windows la línea ya escapada para `cmd.exe` pasa de 8191 caracteres. |
