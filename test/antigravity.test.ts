@@ -144,7 +144,7 @@ test('installs an antigravity plugin through agy and is idempotent', async (t) =
   assert.deepEqual(steps.map((step) => [step.item, step.state]), [
     ['memory', 'installed'],
     ['commands', 'skipped'],
-    ['mcp', 'skipped'],
+    ['mcp demo', 'installed'],
     ['plugin', 'installed'],
   ])
   assert.match(steps.find((step) => step.item === 'commands')?.detail ?? '', /not supported for antigravity/)
@@ -166,12 +166,12 @@ test('installs an antigravity plugin through agy and is idempotent', async (t) =
 
   agy.calls.length = 0
   const again = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
-  assert.deepEqual(again.filter((step) => ['plugin', 'memory'].includes(step.item)).map((step) => step.state), ['present', 'present'])
+  assert.deepEqual(again.filter((step) => ['plugin', 'memory', 'mcp demo'].includes(step.item)).map((step) => step.state), ['present', 'present', 'present'])
   assert.deepEqual(agy.calls, ['plugin list --json'])
 
   agy.calls.length = 0
   const removed = await uninstallIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
-  assert.deepEqual(removed.map((step) => [step.item, step.state]), [['plugin', 'removed'], ['memory', 'removed']])
+  assert.deepEqual(removed.map((step) => [step.item, step.state]), [['plugin', 'removed'], ['mcp demo', 'removed'], ['memory', 'removed']])
   assert.deepEqual(agy.calls, ['plugin list --json', 'plugin uninstall demo'])
   assert.ok(!existsSync(installed))
   assert.ok(!existsSync(root))
@@ -437,4 +437,58 @@ test('an exception in one agent during uninstall does not stop the others or its
   assert.equal(steps.find((step) => step.agent === 'gemini' && step.item === 'extension')?.state, 'removed')
   assert.doesNotMatch(await readFile(antigravityFile, 'utf8'), /kit:demo:begin/)
   assert.doesNotMatch(await readFile(geminiFile, 'utf8'), /kit:demo:begin/)
+})
+
+test('antigravity MCP servers merge into mcp_config.json and keep foreign entries', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const file = path.join(homes.antigravity, 'mcp_config.json')
+  await mkdir(homes.antigravity, { recursive: true })
+  await writeFile(file, JSON.stringify({ mcpServers: { other: { command: 'other', args: [], disabled: true } }, extra: { keep: 1 } }))
+  const withRemote: AgentIntegration = {
+    ...integration,
+    mcp: [
+      { name: 'demo', command: ['demo', 'mcp', '--stdio'], env: { DEMO: '1' } },
+      { name: 'demo-remote', url: 'https://example.test/mcp', headers: { Authorization: 'Bearer x' } },
+    ],
+  }
+  const agy = fakeAgy(homes)
+  const steps = await installIntegration(withRemote, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(steps.find((step) => step.item === 'mcp demo, demo-remote')?.state, 'installed')
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), {
+    mcpServers: {
+      other: { command: 'other', args: [], disabled: true },
+      demo: { command: 'demo', args: ['mcp', '--stdio'], env: { DEMO: '1' }, disabled: false },
+      'demo-remote': { serverUrl: 'https://example.test/mcp', headers: { Authorization: 'Bearer x' }, disabled: false },
+    },
+    extra: { keep: 1 },
+  })
+  assert.ok(existsSync(`${file}.backup`))
+
+  const removed = await uninstallIntegration(withRemote, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(removed.find((step) => step.item === 'mcp demo, demo-remote')?.state, 'removed')
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { mcpServers: { other: { command: 'other', args: [], disabled: true } }, extra: { keep: 1 } })
+  const twice = await uninstallIntegration(withRemote, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(twice.find((step) => step.item === 'mcp demo, demo-remote')?.state, 'skipped')
+})
+
+test('antigravity MCP handles an empty config file, skips invalid JSON and honors skipMcp', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const file = path.join(homes.antigravity, 'mcp_config.json')
+  await mkdir(homes.antigravity, { recursive: true })
+  await writeFile(file, '')
+  const agy = fakeAgy(homes)
+  await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { mcpServers: { demo: { command: 'demo', args: ['mcp'], env: {}, disabled: false } } })
+
+  await writeFile(file, '{ not json')
+  const broken = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(broken.find((step) => step.item === 'mcp demo')?.state, 'failed')
+  assert.equal(await readFile(file, 'utf8'), '{ not json')
+
+  const skipped = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate, skipMcp: true })
+  assert.ok(!skipped.some((step) => step.item.startsWith('mcp')))
 })
