@@ -18,20 +18,20 @@ test('toolchain directories cover the node version managers on unix', async (t) 
   for (const version of ['v9.11.2', 'v22.3.0', 'v20.1.0', 'not-a-version']) await mkdir(path.join(home, '.nvm', 'versions', 'node', version, 'bin'), { recursive: true })
   const ctx = platformContext({ platform: 'linux', home, env: { NVM_BIN: '/nvm/current/bin', VOLTA_HOME: '/volta', NPM_CONFIG_PREFIX: '/prefix', BUN_INSTALL: '/bun' } })
   const dirs = toolchainSearchDirs(ctx)
-  const nvm = (version: string) => path.join(home, '.nvm', 'versions', 'node', version, 'bin')
+  const nvm = (version: string) => path.posix.join(home, '.nvm', 'versions', 'node', version, 'bin')
   assert.deepEqual(dirs.slice(0, 4), ['/nvm/current/bin', nvm('v22.3.0'), nvm('v20.1.0'), nvm('v9.11.2')])
   for (const dir of [
-    path.join(home, '.local', 'share', 'fnm', 'aliases', 'default', 'bin'),
+    path.posix.join(home, '.local', 'share', 'fnm', 'aliases', 'default', 'bin'),
     '/volta/bin',
     '/prefix/bin',
-    path.join(home, '.npm-global', 'bin'),
-    path.join(home, '.local', 'share', 'pnpm'),
+    path.posix.join(home, '.npm-global', 'bin'),
+    path.posix.join(home, '.local', 'share', 'pnpm'),
     '/bun/bin',
-    path.join(home, '.local', 'bin'),
+    path.posix.join(home, '.local', 'bin'),
   ]) {
     assert.ok(dirs.includes(dir), dir)
   }
-  assert.ok(toolchainSearchDirs(platformContext({ platform: 'darwin', home, env: {} })).includes(path.join(home, 'Library', 'pnpm')))
+  assert.ok(toolchainSearchDirs(platformContext({ platform: 'darwin', home, env: {} })).includes(path.posix.join(home, 'Library', 'pnpm')))
 })
 
 test('toolchain directories follow the Windows layout', () => {
