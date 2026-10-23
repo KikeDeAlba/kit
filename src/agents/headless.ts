@@ -1,10 +1,15 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
-import { pathDelimiter, pathKey, platformContext, spawnSpec, type PlatformContext } from '../platform.ts'
+import { pathDelimiter, pathKey, platformContext, spawnSpec, windowsSystemCommand, type PlatformContext } from '../platform.ts'
 import { findAgentBinary } from './binaries.ts'
 
 export const HEADLESS_AGENTS = ['claude', 'codex', 'gemini', 'antigravity', 'opencode'] as const
 export type HeadlessAgent = (typeof HEADLESS_AGENTS)[number]
+
+export function isHeadlessAgent(value: unknown): value is HeadlessAgent {
+  return typeof value === 'string' && (HEADLESS_AGENTS as readonly string[]).includes(value)
+}
 
 export interface HeadlessOptions {
   agent: HeadlessAgent
@@ -54,10 +59,90 @@ export interface HeadlessInvocation {
   args: string[]
   stdin?: string
   env: NodeJS.ProcessEnv
+  unset?: readonly string[]
 }
 
 export const HEADLESS_DEFAULT_TIMEOUT_MS = 600_000
-export const WINDOWS_PROMPT_ARGUMENT_LIMIT = 8000
+export const WINDOWS_COMMAND_LINE_LIMIT = 8191
+
+export const HEADLESS_ENV_ALLOWLIST: readonly string[] = [
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'LANG',
+  'TERM',
+  'USERPROFILE',
+  'USERNAME',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'PROGRAMDATA',
+  'SYSTEMROOT',
+  'SYSTEMDRIVE',
+  'WINDIR',
+  'COMSPEC',
+  'PATHEXT',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'ALL_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'REQUESTS_CA_BUNDLE',
+  'KIT_HEADLESS',
+]
+
+export const HEADLESS_ENV_PREFIXES: readonly string[] = ['LC_', 'XDG_', 'NVM_']
+
+export const HEADLESS_AGENT_ENV_PREFIXES: Record<HeadlessAgent, readonly string[]> = {
+  claude: ['ANTHROPIC_', 'CLAUDE_'],
+  codex: ['OPENAI_', 'CODEX_'],
+  gemini: ['GEMINI_', 'GOOGLE_'],
+  antigravity: ['ANTIGRAVITY_', 'GEMINI_'],
+  opencode: ['OPENCODE_'],
+}
+
+function enabled(value: string | undefined): boolean {
+  return value !== undefined && value !== '' && value !== '0' && value.toLowerCase() !== 'false'
+}
+
+function agentEnvRules(agent: HeadlessAgent, env: NodeJS.ProcessEnv): { prefixes: string[]; names: string[]; excluded: string[] } {
+  const prefixes = [...HEADLESS_AGENT_ENV_PREFIXES[agent]]
+  const names: string[] = []
+  const excluded: string[] = []
+  if (agent === 'claude') {
+    if (enabled(env['CLAUDE_CODE_USE_BEDROCK'])) prefixes.push('AWS_')
+    if (enabled(env['CLAUDE_CODE_USE_VERTEX'])) {
+      prefixes.push('GOOGLE_')
+      names.push('CLOUD_ML_REGION')
+    }
+  }
+  if (agent === 'gemini' && !enabled(env['GOOGLE_GENAI_USE_VERTEXAI'])) excluded.push('GOOGLE_APPLICATION_CREDENTIALS')
+  return { prefixes, names, excluded }
+}
+
+export function headlessEnv(agent: HeadlessAgent, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const rules = agentEnvRules(agent, env)
+  const prefixes = [...HEADLESS_ENV_PREFIXES, ...rules.prefixes]
+  const kept: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(env)) {
+    const upper = key.toUpperCase()
+    if (rules.excluded.includes(upper)) continue
+    if (HEADLESS_ENV_ALLOWLIST.includes(upper) || rules.names.includes(upper) || prefixes.some((prefix) => upper.startsWith(prefix))) kept[key] = value
+  }
+  return kept
+}
+
+export function headlessEnvironment(agent: HeadlessAgent, base: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...headlessEnv(agent, { ...base, ...extra }), ...extra }
+}
 
 export function headlessInvocation(
   agent: HeadlessAgent,
@@ -66,21 +151,30 @@ export function headlessInvocation(
   const write = options.access === 'write'
   const extra = [...(options.extraArgs ?? [])]
   const model = (flag: string) => (options.model ? [flag, options.model] : [])
-  if (agent === 'claude') return { args: ['-p', '--output-format', 'json', ...model('--model'), ...extra], stdin: options.prompt, env: {} }
+  const stdin = options.prompt
+  if (agent === 'claude') {
+    const access = write ? ['--permission-mode', 'acceptEdits'] : ['--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user']
+    return { args: ['-p', '--output-format', 'json', ...access, ...model('--model'), ...extra], stdin, env: {} }
+  }
   if (agent === 'codex') {
     return {
       args: ['exec', '--json', '-C', options.cwd, '--skip-git-repo-check', '--sandbox', write ? 'workspace-write' : 'read-only', ...model('-m'), ...extra, '-'],
-      stdin: options.prompt,
+      stdin,
       env: {},
     }
   }
   if (agent === 'gemini') {
-    return { args: ['-o', 'json', '--approval-mode', write ? 'yolo' : 'plan', ...model('-m'), ...extra], stdin: options.prompt, env: { GEMINI_CLI_TRUST_WORKSPACE: 'true' } }
+    return {
+      args: ['-o', 'json', '--approval-mode', write ? 'auto_edit' : 'plan', ...model('-m'), ...extra],
+      stdin,
+      env: write ? { GEMINI_CLI_TRUST_WORKSPACE: 'true' } : {},
+      ...(write ? {} : { unset: ['GEMINI_CLI_TRUST_WORKSPACE'] }),
+    }
   }
   if (agent === 'antigravity') {
-    return { args: ['-p', options.prompt, '--output-format', 'json', ...model('--model'), ...(write ? ['--dangerously-skip-permissions'] : []), ...extra], env: {} }
+    return { args: [`--print=${options.prompt}`, '--output-format', 'json', ...model('--model'), ...(write ? ['--dangerously-skip-permissions'] : []), ...extra], env: {} }
   }
-  return { args: ['run', '--format', 'json', ...model('-m'), ...extra, options.prompt], env: {} }
+  return { args: ['run', '--format', 'json', ...(write ? [] : ['--agent', 'plan']), ...model('-m'), ...extra], stdin, env: {} }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -188,21 +282,36 @@ function parseOpenCode(stdout: string): { text: string; sessionId?: string } {
   return sessionId ? { text: answer, sessionId } : { text: answer }
 }
 
+function antigravityFailure(payload: Record<string, unknown>): string | undefined {
+  const error = payload['error']
+  if ((typeof error === 'string' && error.length > 0) || asRecord(error)) return errorMessage(error)
+  if (payload['status'] === 'ERROR') return 'status ERROR'
+  const denied = Array.isArray(payload['denied_actions']) ? payload['denied_actions'] : []
+  const response = text(payload['response']) ?? ''
+  if (response.trim().length === 0 && denied.length > 0) {
+    const names = denied.map((entry) => text(asRecord(entry)?.['action']) ?? JSON.stringify(entry)).join(', ')
+    return `permission denied for ${names}`
+  }
+  return undefined
+}
+
 export function parseHeadlessOutput(agent: HeadlessAgent, stdout: string): { text: string; sessionId?: string } {
+  if (!isHeadlessAgent(agent)) throw new HeadlessError('UNAVAILABLE', agent, `${String(agent)} is not a headless agent`, { stdout })
   if (agent === 'claude') {
     return parseSingle(agent, stdout, 'result', 'session_id', (payload) => (payload['is_error'] === true ? (text(payload['result']) ?? text(payload['subtype']) ?? 'error') : undefined))
   }
   if (agent === 'gemini') return parseSingle(agent, stdout, 'response', 'session_id', (payload) => (payload['error'] !== undefined && payload['response'] === undefined ? errorMessage(payload['error']) : undefined))
-  if (agent === 'antigravity') {
-    return parseSingle(agent, stdout, 'response', 'conversation_id', (payload) => (payload['error'] !== undefined && payload['response'] === undefined ? errorMessage(payload['error']) : undefined))
-  }
+  if (agent === 'antigravity') return parseSingle(agent, stdout, 'response', 'conversation_id', antigravityFailure)
   if (agent === 'codex') return parseCodex(stdout)
   return parseOpenCode(stdout)
 }
 
-function childEnv(bin: string, base: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv, ctx: PlatformContext): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base, ...extra, KIT_HEADLESS: '1' }
+function childEnv(agent: HeadlessAgent, bin: string, invocation: HeadlessInvocation, options: HeadlessOptions, ctx: PlatformContext): NodeJS.ProcessEnv {
+  const inherited = headlessEnv(agent, { ...ctx.env, ...(options.env ?? {}) })
+  for (const key of invocation.unset ?? []) delete inherited[key]
+  const env: NodeJS.ProcessEnv = { ...inherited, ...invocation.env, ...(options.env ?? {}), KIT_HEADLESS: '1' }
   const key = pathKey(env)
+  for (const other of Object.keys(env)) if (other !== key && other.toUpperCase() === 'PATH') delete env[other]
   const dir = (ctx.platform === 'win32' ? path.win32 : path.posix).dirname(bin)
   const delimiter = pathDelimiter(ctx)
   const current = (env[key] ?? '').split(delimiter).filter((entry) => entry.length > 0 && entry !== dir)
@@ -211,29 +320,54 @@ function childEnv(bin: string, base: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv
 }
 
 function killTree(child: ChildProcess, ctx: PlatformContext): void {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  if (ctx.platform === 'win32' && child.pid !== undefined) {
-    const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+  if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return
+  const pid = child.pid
+  if (ctx.platform === 'win32') {
+    const taskkill = windowsSystemCommand('taskkill.exe', ctx)
+    const killer = spawn(taskkill, ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, cwd: path.win32.dirname(taskkill) })
     killer.once('error', () => child.kill())
     return
   }
-  child.kill('SIGTERM')
+  const signal = (name: NodeJS.Signals) => {
+    try {
+      process.kill(-pid, name)
+    } catch {
+      child.kill(name)
+    }
+  }
+  signal('SIGTERM')
   setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    if (child.exitCode === null && child.signalCode === null) signal('SIGKILL')
   }, 3000).unref()
+}
+
+function stderrSummary(stderr: string): string {
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
+  return lines.find((line) => line.includes('Error')) ?? lines.at(-1) ?? ''
+}
+
+function checkArgumentPrompt(agent: HeadlessAgent, bin: string, invocation: HeadlessInvocation, prompt: string, ctx: PlatformContext): void {
+  if (invocation.stdin !== undefined || ctx.platform !== 'win32' || !/\.(cmd|bat)$/i.test(bin)) return
+  if (/[\r\n]/.test(prompt)) {
+    throw new HeadlessError('FAILED', agent, `${agent} takes the prompt as an argument and ${path.win32.basename(bin)} goes through cmd.exe, which cuts the command line at the first line break`)
+  }
+  const line = spawnSpec(bin, invocation.args, ctx).args.at(-1) ?? ''
+  if (line.length > WINDOWS_COMMAND_LINE_LIMIT) {
+    throw new HeadlessError('PROMPT_TOO_LONG', agent, `${agent} takes the prompt as an argument and the escaped cmd.exe command line has ${line.length} characters; the limit is ${WINDOWS_COMMAND_LINE_LIMIT}`)
+  }
 }
 
 export async function runHeadless(options: HeadlessOptions): Promise<HeadlessResult> {
   const ctx = options.ctx ?? platformContext()
   const agent = options.agent
+  if (!isHeadlessAgent(agent)) throw new HeadlessError('UNAVAILABLE', agent, `${String(agent)} is not a headless agent; use one of ${HEADLESS_AGENTS.join(', ')}`)
   const bin = options.bin ?? (await findAgentBinary(agent, { ctx }))
   if (!bin) throw new HeadlessError('UNAVAILABLE', agent, `${agent} is not installed or not on PATH`)
   const invocation = headlessInvocation(agent, options)
-  if (invocation.stdin === undefined && ctx.platform === 'win32' && /\.(cmd|bat)$/i.test(bin) && options.prompt.length > WINDOWS_PROMPT_ARGUMENT_LIMIT) {
-    throw new HeadlessError('PROMPT_TOO_LONG', agent, `${agent} takes the prompt as an argument and ${path.win32.basename(bin)} goes through cmd.exe, which cannot pass more than ${WINDOWS_PROMPT_ARGUMENT_LIMIT} characters`)
-  }
+  checkArgumentPrompt(agent, bin, invocation, options.prompt, ctx)
+  if (!existsSync(options.cwd)) throw new HeadlessError('FAILED', agent, `working directory ${options.cwd} does not exist`)
   const spec = spawnSpec(bin, invocation.args, ctx)
-  const env = childEnv(bin, options.env ?? ctx.env, invocation.env, ctx)
+  const env = childEnv(agent, bin, invocation, options, ctx)
   const started = Date.now()
   return new Promise<HeadlessResult>((resolve, reject) => {
     if (options.signal?.aborted) {
@@ -246,6 +380,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       windowsVerbatimArguments: spec.windowsVerbatimArguments,
+      detached: ctx.platform !== 'win32',
     })
     let stdout = ''
     let stderr = ''
@@ -272,8 +407,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
     })
     child.stdout?.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk))
     child.stderr?.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk))
-    child.once('error', (error) => {
-      finish(() => reject(new HeadlessError('UNAVAILABLE', agent, `could not start ${bin}: ${error.message}`, { stdout, stderr })))
+    child.once('error', (error: NodeJS.ErrnoException) => {
+      const code = error.code === 'E2BIG' ? 'PROMPT_TOO_LONG' : 'UNAVAILABLE'
+      finish(() => reject(new HeadlessError(code, agent, `could not start ${bin}: ${error.message}`, { stdout, stderr })))
     })
     child.once('close', (code) => {
       finish(() => {
@@ -285,13 +421,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
           parsed = parseHeadlessOutput(agent, stdout)
         } catch (error) {
           if (code !== 0) {
-            const detail = error instanceof HeadlessError && error.code === 'FAILED' ? error.message : (stderr.trim().split('\n').at(-1) ?? '')
+            const detail = error instanceof HeadlessError && error.code === 'FAILED' ? error.message : stderrSummary(stderr)
             return reject(new HeadlessError('FAILED', agent, `${agent} exited with ${code}${detail ? `: ${detail}` : ''}`, details))
           }
           if (error instanceof HeadlessError) return reject(new HeadlessError(error.code, agent, error.message, details))
           return reject(error)
         }
-        if (code !== 0) return reject(new HeadlessError('FAILED', agent, `${agent} exited with ${code}`, details))
+        if (code !== 0) {
+          const detail = stderrSummary(stderr)
+          return reject(new HeadlessError('FAILED', agent, `${agent} exited with ${code}${detail ? `: ${detail}` : ''}`, details))
+        }
         resolve({ agent, text: parsed.text, ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}), raw: stdout, stderr, durationMs: Date.now() - started })
       })
     })
@@ -305,14 +444,15 @@ export async function pickHeadlessAgent(
   options: { ctx?: PlatformContext; order?: readonly HeadlessAgent[] } = {},
 ): Promise<{ agent: HeadlessAgent; bin: string; fallback: boolean } | null> {
   const ctx = options.ctx ?? platformContext()
-  if (preferred) {
+  const requested = preferred !== undefined && preferred !== null
+  if (requested && isHeadlessAgent(preferred)) {
     const bin = await findAgentBinary(preferred, { ctx })
     if (bin) return { agent: preferred, bin, fallback: false }
   }
   for (const agent of options.order ?? HEADLESS_AGENTS) {
-    if (agent === preferred) continue
+    if (agent === preferred || !isHeadlessAgent(agent)) continue
     const bin = await findAgentBinary(agent, { ctx })
-    if (bin) return { agent, bin, fallback: Boolean(preferred) }
+    if (bin) return { agent, bin, fallback: requested }
   }
   return null
 }
