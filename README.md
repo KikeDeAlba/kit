@@ -143,12 +143,15 @@ el comando a correr. Antigravity se detecta por el binario `agy` o por
 Los plugins de `agy` no admiten hooks ni servidores MCP, así que los servidores MCP
 se escriben directo en `<homes.antigravity>/mcp_config.json`, sin pasar por
 `agy mcp`. Cada servidor queda bajo `mcpServers.<nombre>` como
-`{ command, args, env, disabled: false }` o, si es remoto,
-`{ serverUrl, headers, disabled: false }`. Solo se tocan las entradas de la
-integración: las demás claves del archivo se conservan, la escritura es atómica y
-se deja `mcp_config.json.backup`. Un archivo vacío cuenta como `{}`; uno con JSON
+`{ command, args, env?, disabled: false, _kit: "<herramienta>" }` o, si es remoto,
+`{ serverUrl, headers?, disabled: false, _kit: "<herramienta>" }`. `_kit` marca la
+entrada como propia: `agy` lo conserva al reescribir el archivo. Si ya hay una
+entrada con el mismo nombre sin esa marca, no se pisa y el paso sale `skipped`
+con el conflicto en `detail`. Las demás claves del archivo se conservan, la
+escritura es atómica, conserva el modo del archivo (o `0600` si es nuevo) y deja
+`mcp_config.json.backup`. Un archivo vacío cuenta como `{}`; uno con JSON
 inválido no se toca y el paso sale `failed`. `uninstallIntegration` quita solo
-esas entradas.
+las entradas con la marca de la herramienta.
 
 #### Binarios de los agentes
 
@@ -157,7 +160,7 @@ esas entradas.
 Esto importa cuando la herramienta corre desde un hook o una app de escritorio y
 no hereda el `PATH` de la terminal. El orden de búsqueda es este:
 
-1. `override`, si se pasa y es ejecutable.
+1. `override`, si se pasa. Si no es ejecutable devuelve `null` y no sigue buscando.
 2. El `PATH` y luego `defaultSearchDirs`.
 3. Los gestores de Node, con `toolchainSearchDirs`: `NVM_BIN`,
    `~/.nvm/versions/node/*/bin` de la versión más nueva a la más vieja, el alias
@@ -180,19 +183,52 @@ if (picked.fallback) console.warn(`usando ${picked.agent}`)
 const { text, sessionId } = await agents.runHeadless({ agent: picked.agent, bin: picked.bin, prompt, cwd, access: 'read' })
 ```
 
-| Agente | Invocación | Prompt | Respuesta |
-|---|---|---|---|
-| claude | `claude -p --output-format json [--model m]` | stdin | `result`, `session_id` |
-| codex | `codex exec --json -C <cwd> --skip-git-repo-check --sandbox read-only\|workspace-write [-m m] -` | stdin | último `item.completed` con `agent_message`; id en `thread.started` |
-| gemini | `gemini -o json --approval-mode plan\|yolo [-m m]` con `GEMINI_CLI_TRUST_WORKSPACE=true` | stdin | `response`, `session_id` |
-| antigravity | `agy -p <prompt> --output-format json [--model m]`, más `--dangerously-skip-permissions` solo con `access: 'write'` | argumento | `response`, `conversation_id` |
-| opencode | `opencode run --format json [-m proveedor/modelo] <prompt>` | argumento | `part.text` de los eventos `text`, unidos; `sessionID` |
+El prompt va por stdin en todos los agentes salvo `agy`, que no lo lee y lo recibe
+como `--print=<prompt>`, así un prompt que empieza con `-` no se toma como flag.
 
-`access` vale `read` por omisión. El proceso hijo recibe `KIT_HEADLESS=1`, que
-los hooks de bita y gaze respetan para no registrar esa sesión, y lleva la
-carpeta del binario al principio del `PATH`. El tiempo límite por omisión es de
-10 minutos; al vencer, o al abortar con `signal`, se mata el árbol de procesos
-(`taskkill /T /F` en Windows).
+| Agente | Invocación | `access: 'read'` (por omisión) | `access: 'write'` | Respuesta |
+|---|---|---|---|---|
+| claude | `claude -p --output-format json [--model m]` | `--tools Read,Grep,Glob --permission-mode plan --setting-sources user` | `--permission-mode acceptEdits` | `result`, `session_id` |
+| codex | `codex exec --json -C <cwd> --skip-git-repo-check [-m m] -` | `--sandbox read-only` | `--sandbox workspace-write` | último `item.completed` con `agent_message`; id en `thread.started` |
+| gemini | `gemini -o json [-m m]` | `--approval-mode plan`, sin `GEMINI_CLI_TRUST_WORKSPACE` | `--approval-mode auto_edit` y `GEMINI_CLI_TRUST_WORKSPACE=true` | `response`, `session_id` |
+| antigravity | `agy --print=<prompt> --output-format json [--model m]` | sin flags extra | `--dangerously-skip-permissions` | `response`, `conversation_id` |
+| opencode | `opencode run --format json [-m proveedor/modelo]` | `--agent plan` | agente por omisión | `part.text` de los eventos `text`, unidos; `sessionID` |
+
+`extraArgs` va después de los flags de acceso. Si `agy` deja `response` vacío y
+reporta `denied_actions`, la corrida falla con `FAILED`.
+
+El hijo no hereda todo el entorno. `headlessEnv(agent, env)` filtra con una lista
+blanca común, y bita, recap e inkwell pueden usarla para lo mismo:
+
+- `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`/`TMP`/`TEMP`, `LANG`, `LC_*`,
+  `TERM`, `XDG_*`, `NVM_*` y `KIT_HEADLESS`.
+- Proxy y certificados: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` (también en
+  minúsculas), `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` y
+  `REQUESTS_CA_BUNDLE`.
+- Windows: `USERPROFILE`, `USERNAME`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`,
+  `LOCALAPPDATA`, `PROGRAMDATA`, `SystemRoot`, `SystemDrive`, `WINDIR`, `ComSpec` y
+  `PATHEXT`.
+
+A eso se suman solo los prefijos del agente que corre:
+
+| Agente | Prefijos | Condicionales |
+|---|---|---|
+| claude | `ANTHROPIC_`, `CLAUDE_` | `AWS_*` si `CLAUDE_CODE_USE_BEDROCK`; `GOOGLE_*` y `CLOUD_ML_REGION` si `CLAUDE_CODE_USE_VERTEX` |
+| codex | `OPENAI_`, `CODEX_` | |
+| gemini | `GEMINI_`, `GOOGLE_` | `GOOGLE_APPLICATION_CREDENTIALS` solo si `GOOGLE_GENAI_USE_VERTEXAI` |
+| antigravity | `ANTIGRAVITY_`, `GEMINI_` | |
+| opencode | `OPENCODE_` | |
+
+Así claude no ve `OPENAI_API_KEY` ni codex `ANTHROPIC_API_KEY`. Las claves de
+proveedor que use opencode hay que pasarlas en `env`: lo que se pase ahí se
+agrega encima y gana. Al final se fija `KIT_HEADLESS=1`, que los hooks de bita y
+gaze respetan para no registrar esa sesión, y se pone la carpeta del binario al
+principio del `PATH`.
+
+El tiempo límite por omisión es de 10 minutos. Al vencer, o al abortar con
+`signal`, se mata el árbol de procesos: en unix el hijo corre en su propio grupo
+y se manda `SIGTERM` y luego `SIGKILL` al grupo; en Windows se usa
+`%SystemRoot%\System32\taskkill.exe /T /F`.
 
 Los fallos lanzan `HeadlessError` con un `code`, además de `exitCode`, `stdout`
 y `stderr`:
@@ -200,13 +236,15 @@ y `stderr`:
 | `code` | Cuándo |
 |---|---|
 | `UNAVAILABLE` | No se encontró el binario o no se pudo lanzar. |
-| `FAILED` | Salió con código distinto de cero, el agente reportó un error en su JSON o se abortó. |
+| `FAILED` | Salió con código distinto de cero, el agente reportó un error en su JSON, se abortó, `cwd` no existe o el prompt trae saltos de línea y debe ir como argumento a un `.cmd`. |
 | `TIMEOUT` | Se venció `timeoutMs`. |
 | `PARSE` | Salió bien pero su salida no trae la respuesta. |
-| `PROMPT_TOO_LONG` | En Windows, un prompt de más de 8000 caracteres que va como argumento a un `.cmd`. |
+| `PROMPT_TOO_LONG` | El sistema rechazó la línea de comandos (`E2BIG`), o en Windows la línea ya escapada para `cmd.exe` pasa de 8191 caracteres. |
 
 `parseHeadlessOutput(agent, stdout)` y `headlessInvocation(agent, opciones)`
-están expuestos para probar sin lanzar procesos. `pickHeadlessAgent(preferido)`
+están expuestos para probar sin lanzar procesos. `isHeadlessAgent` valida un id;
+uno desconocido hace fallar `runHeadless` con `UNAVAILABLE`. El mensaje de error
+toma la primera línea de stderr que contenga «Error», o la última si no hay. `pickHeadlessAgent(preferido)`
 devuelve el preferido si está instalado. Si no, devuelve el primero disponible
 de `order` (claude va primero) con `fallback: true` para que quien llama avise.
 
@@ -356,15 +394,18 @@ trae y Claude Code lo carga dos veces.
 
 `spawnSpec(comando, args, ctx)` devuelve `{ command, args, windowsVerbatimArguments }`
 listo para `spawn`. En Windows un `.cmd` o `.bat` se envuelve en
-`cmd.exe /d /s /c` con cada argumento entre comillas y los metacaracteres
-escapados, así un argumento con `&`, `|` o comillas no se interpreta como
-comando. En los demás casos devuelve el comando tal cual. `run` lo usa en vez de
+`%SystemRoot%\System32\cmd.exe /d /s /c` con cada argumento entre comillas y los
+metacaracteres escapados, así un argumento con `&`, `|` o comillas no se
+interpreta como comando. Un argumento con saltos de línea lanza un error, porque
+`cmd.exe` corta ahí la línea. En los demás casos devuelve el comando tal cual. `run` lo usa en vez de
 `shell: true`. `whichSync` es la versión síncrona de `which`, y las dos aceptan
 un cuarto argumento con carpetas que se buscan después de `defaultSearchDirs`.
 
 `notify(título, cuerpo)` muestra una notificación del sistema y devuelve `true` o
-`false`, nunca lanza. En macOS usa `osascript` con el texto por `argv`, en Linux
-`notify-send` y en Windows un toast de PowerShell con `-EncodedCommand`.
+`false`, nunca lanza. El título se recorta a 256 caracteres y el cuerpo a 2000. En
+macOS usa `osascript` con el texto por `argv` después de `--`, en Linux
+`notify-send` con `<`, `>` y `&` escapados, y en Windows un toast de PowerShell
+con `-EncodedCommand`.
 `notifyCommand` da el comando sin ejecutarlo.
 
 ### 5. Credenciales
