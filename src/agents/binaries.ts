@@ -27,7 +27,7 @@ function nvmVersionDirs(root: string, join: (...parts: string[]) => string): str
 function fnmRoot(ctx: PlatformContext, join: (...parts: string[]) => string): string {
   const explicit = ctx.env['FNM_DIR']
   if (explicit) return explicit
-  if (ctx.platform === 'win32') return join(configHome(ctx), 'fnm')
+  if (ctx.platform === 'win32') return join(dataHome(ctx), 'fnm')
   if (ctx.platform === 'darwin') return join(ctx.home, 'Library', 'Application Support', 'fnm')
   return join(dataHome(ctx), 'fnm')
 }
@@ -86,23 +86,17 @@ function trailingDirs(agent: AgentName, ctx: PlatformContext): string[] {
 
 export async function findAgentBinary(agent: AgentName, options: { ctx?: PlatformContext; override?: string } = {}): Promise<string | null> {
   const ctx = options.ctx ?? platformContext()
-  if (options.override) {
-    const found = await which(options.override, ctx)
-    if (found) return found
-  }
+  if (options.override) return which(options.override, ctx)
   const binary = AGENT_BINARIES[agent]
-  if (binary === null) return null
+  if (binary == null) return null
   return which(binary, ctx, [], trailingDirs(agent, ctx))
 }
 
 export function findAgentBinarySync(agent: AgentName, options: { ctx?: PlatformContext; override?: string } = {}): string | null {
   const ctx = options.ctx ?? platformContext()
-  if (options.override) {
-    const found = whichSync(options.override, ctx)
-    if (found) return found
-  }
+  if (options.override) return whichSync(options.override, ctx)
   const binary = AGENT_BINARIES[agent]
-  if (binary === null) return null
+  if (binary == null) return null
   return whichSync(binary, ctx, [], trailingDirs(agent, ctx))
 }
 
