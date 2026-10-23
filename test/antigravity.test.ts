@@ -335,3 +335,100 @@ test('an unreadable plugin list falls back to validate and install, and uninstal
   assert.equal(removed.find((step) => step.item === 'plugin')?.state, 'skipped')
   assert.ok(!agy.calls.includes('plugin uninstall demo'))
 })
+
+test('a plugin list wrapped in an object is understood', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const agy = fakeAgy(homes)
+  const exec: typeof agy.exec = async (command, args) => {
+    const output = await agy.exec(command, args)
+    return args[1] === 'list' ? JSON.stringify({ plugins: JSON.parse(output as string) }) : output
+  }
+  const options = { agents: ['antigravity'] as const, ctx, homes, exec, locate: agy.locate }
+  assert.equal((await installIntegration(integration, options)).find((step) => step.item === 'plugin')?.state, 'installed')
+  agy.calls.length = 0
+  assert.equal((await installIntegration(integration, options)).find((step) => step.item === 'plugin')?.state, 'present')
+  assert.deepEqual(agy.calls, ['plugin list --json'])
+  assert.equal((await uninstallIntegration(integration, options)).find((step) => step.item === 'plugin')?.state, 'removed')
+  agy.calls.length = 0
+  assert.equal((await uninstallIntegration(integration, options)).find((step) => step.item === 'plugin')?.state, 'skipped')
+  assert.deepEqual(agy.calls, ['plugin list --json'])
+})
+
+test('failing plugin list and uninstall commands become steps instead of exceptions', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const agy = fakeAgy(homes)
+  const failing = (uninstall: Error) => async (command: string, args: readonly string[]) => {
+    if (args[1] === 'list') throw new Error('agy crashed')
+    if (args[1] === 'uninstall') throw uninstall
+    return agy.exec(command, args)
+  }
+  const options = { agents: ['antigravity'] as const, ctx, homes, locate: agy.locate }
+  const installed = await installIntegration(integration, { ...options, exec: failing(new Error('unused')) })
+  assert.equal(installed.find((step) => step.item === 'plugin')?.state, 'installed')
+
+  const failed = await uninstallIntegration(integration, { ...options, exec: failing(Object.assign(new Error('Command failed'), { stderr: 'permission denied' })) })
+  const plugin = failed.find((step) => step.item === 'plugin')
+  assert.equal(plugin?.state, 'failed')
+  assert.match(plugin?.detail ?? '', /agy plugin uninstall failed/)
+  assert.equal(failed.find((step) => step.item === 'memory')?.state, 'removed')
+
+  const absent = await uninstallIntegration(integration, { ...options, exec: failing(Object.assign(new Error('Command failed'), { stderr: 'plugin demo not found' })) })
+  assert.equal(absent.find((step) => step.item === 'plugin')?.state, 'skipped')
+
+  const removed = await uninstallIntegration(integration, { ...options, exec: async (command, args) => (args[1] === 'list' ? Promise.reject(new Error('agy crashed')) : agy.exec(command, args)) })
+  assert.equal(removed.find((step) => step.item === 'plugin')?.state, 'removed')
+  assert.ok(!existsSync(path.join(homes.antigravity, 'plugins', 'demo')))
+})
+
+async function splitHomes(t: Parameters<typeof tempDir>[0]) {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '', GEMINI_CLI_HOME: path.join(home, 'cli') })
+  const { integration } = await fixture(home)
+  const homes = agentHomes(ctx, { claudeDesktop: null })
+  return { ctx, integration, homes, geminiFile: memoryFile('gemini', homes), antigravityFile: memoryFile('antigravity', homes) }
+}
+
+test('with GEMINI_CLI_HOME gemini and antigravity keep separate memory blocks', async (t) => {
+  const { ctx, integration, homes, geminiFile, antigravityFile } = await splitHomes(t)
+  assert.notEqual(geminiFile, antigravityFile)
+  assert.equal(geminiFile, path.join(ctx.home, 'cli', '.gemini', 'GEMINI.md'))
+  assert.equal(antigravityFile, path.join(ctx.home, '.gemini', 'GEMINI.md'))
+  const agy = fakeAgy(homes)
+  const options = { ctx, homes, exec: agy.exec, locate: agy.locate }
+
+  const steps = await installIntegration(integration, { ...options, agents: ['gemini', 'antigravity'] })
+  assert.deepEqual(steps.filter((step) => step.item === 'memory').map((step) => [step.agent, step.state]), [['gemini', 'installed'], ['antigravity', 'installed']])
+  assert.match(await readFile(geminiFile, 'utf8'), /kit:demo:begin/)
+  assert.match(await readFile(antigravityFile, 'utf8'), /kit:demo:begin/)
+
+  const gemini = await uninstallIntegration(integration, { ...options, agents: ['gemini'] })
+  assert.equal(gemini.find((step) => step.item === 'memory')?.state, 'removed')
+  assert.doesNotMatch(await readFile(geminiFile, 'utf8'), /kit:demo:begin/)
+  assert.match(await readFile(antigravityFile, 'utf8'), /kit:demo:begin/)
+
+  const antigravity = await uninstallIntegration(integration, { ...options, agents: ['antigravity'] })
+  assert.equal(antigravity.find((step) => step.item === 'memory')?.state, 'removed')
+  assert.doesNotMatch(await readFile(antigravityFile, 'utf8'), /kit:demo:begin/)
+})
+
+test('an exception in one agent during uninstall does not stop the others or its memory removal', async (t) => {
+  const { ctx, integration, homes, geminiFile, antigravityFile } = await splitHomes(t)
+  const agy = fakeAgy(homes)
+  await installIntegration(integration, { ctx, homes, exec: agy.exec, locate: agy.locate, agents: ['antigravity', 'gemini'] })
+  const locate = async (command: string) => {
+    if (command === 'agy') throw new Error('locator exploded')
+    return agy.locate(command)
+  }
+  const steps = await uninstallIntegration(integration, { ctx, homes, exec: agy.exec, locate, agents: ['antigravity', 'gemini'] })
+  const failed = steps.find((step) => step.agent === 'antigravity' && step.item === 'integration')
+  assert.equal(failed?.state, 'failed')
+  assert.match(failed?.detail ?? '', /locator exploded/)
+  assert.deepEqual(steps.filter((step) => step.item === 'memory').map((step) => [step.agent, step.state]).sort(), [['antigravity', 'removed'], ['gemini', 'removed']])
+  assert.equal(steps.find((step) => step.agent === 'gemini' && step.item === 'extension')?.state, 'removed')
+  assert.doesNotMatch(await readFile(antigravityFile, 'utf8'), /kit:demo:begin/)
+  assert.doesNotMatch(await readFile(geminiFile, 'utf8'), /kit:demo:begin/)
+})
