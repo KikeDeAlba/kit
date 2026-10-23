@@ -111,3 +111,33 @@ test('child processes get the running node on PATH', async () => {
   const again = withRuntimePath(env, path.join(path.sep, 'opt', 'node', 'bin', 'node'))
   assert.equal(again['PATH'], env['PATH'])
 })
+
+test('spawnSpec neutralizes cmd metacharacters in hostile prompts', () => {
+  const win = platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: {} })
+  const line = (arg: string) => spawnSpec('C:\\x\\agy.cmd', [arg], win).args[3] ?? ''
+  assert.equal(line('-p'), '"C:\\x\\agy.cmd ^^^"-p^^^""')
+  assert.equal(line('--dangerously-skip-permissions'), '"C:\\x\\agy.cmd ^^^"--dangerously-skip-permissions^^^""')
+  assert.equal(line('say "hi"'), '"C:\\x\\agy.cmd ^^^"say^^^ \\^^^"hi\\^^^"^^^""')
+  assert.equal(line('100%'), '"C:\\x\\agy.cmd ^^^"100^^^%^^^""')
+  assert.equal(line('%PATH%'), '"C:\\x\\agy.cmd ^^^"^^^%PATH^^^%^^^""')
+  assert.equal(line('a^b'), '"C:\\x\\agy.cmd ^^^"a^^^^b^^^""')
+  assert.equal(line('a&b|c<d>e'), '"C:\\x\\agy.cmd ^^^"a^^^&b^^^|c^^^<d^^^>e^^^""')
+  assert.equal(line('"& calc &"'), '"C:\\x\\agy.cmd ^^^"\\^^^"^^^&^^^ calc^^^ ^^^&\\^^^"^^^""')
+  for (const hostile of ['a&b', 'a|b', 'a>b', 'a<b', '%X%', 'a^b', '(a)', 'a;b', 'a,b']) {
+    const body = (line(hostile).match(/\^\^\^"(.*)\^\^\^"/)?.[1] ?? '').replaceAll(/\^\^\^./g, '')
+    assert.ok(!/[&|<>%^()]/.test(body), `${hostile} leaks into ${body}`)
+  }
+})
+
+test('spawnSpec keeps line breaks out of the cmd.exe command line', { todo: 'cmd.exe truncates the command line at the first line break' }, () => {
+  const win = platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: {} })
+  for (const prompt of ['first\nsecond', 'first\r\nsecond']) {
+    assert.doesNotMatch(spawnSpec('C:\\x\\agy.cmd', ['-p', prompt], win).args[3] ?? '', /[\r\n]/)
+  }
+})
+
+test('spawnSpec leaves executables untouched whatever the arguments', () => {
+  const win = platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: {} })
+  const args = ['-p', 'a "b" & c %X% ^', 'l1\nl2']
+  assert.deepEqual(spawnSpec('C:\\x\\agy.exe', args, win), { command: 'C:\\x\\agy.exe', args, windowsVerbatimArguments: false })
+})

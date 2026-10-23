@@ -138,3 +138,107 @@ test('pickHeadlessAgent honors the preference and reports a fallback', { skip: p
   assert.deepEqual(await pickHeadlessAgent(null, { ctx, order: ['gemini'] }), { agent: 'gemini', bin: path.join(bin, 'gemini'), fallback: false })
   assert.equal(await pickHeadlessAgent('antigravity', { ctx, order: ['antigravity'] }), null)
 })
+
+const ARGS_ECHO = `
+let input = ''
+process.stdin.setEncoding('utf8').on('data', (chunk) => (input += chunk)).on('end', () => {
+  console.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: JSON.stringify({ input, args: process.argv.slice(2), headless: process.env.KIT_HEADLESS, trust: process.env.GEMINI_CLI_TRUST_WORKSPACE, marker: process.env.KIT_MARKER }) }))
+})
+`
+
+const AWKWARD_PROMPTS = ['-p', '--help', '- leading dash', 'say "hi" and \'bye\'', '100% ^ & | < > ( ) ; $HOME `id` $(id)', 'line one\nline two\r\nline three', '', 'ünïcödé 🚀']
+
+const CHANNEL_ECHO = `
+let input = ''
+process.stdin.setEncoding('utf8').on('data', (chunk) => (input += chunk)).on('end', () => {
+  const seen = JSON.stringify({ input, args: process.argv.slice(2) })
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 't' }))
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: seen } }))
+  console.log(JSON.stringify({ type: 'text', sessionID: 'o', part: { id: 'p', messageID: 'm', text: seen } }))
+  console.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: seen, response: seen, conversation_id: 'c' }))
+})
+`
+
+test('prompts with dashes, quotes, shell characters and line breaks arrive untouched on every channel', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const echo = await fakeHarness(home, 'echo.cjs', CHANNEL_ECHO)
+  for (const prompt of AWKWARD_PROMPTS) {
+    for (const agent of ['claude', 'codex', 'gemini'] as HeadlessAgent[]) {
+      const seen = JSON.parse((await runHeadless({ agent, prompt, cwd: home, bin: echo, ctx })).text) as { input: string; args: string[] }
+      assert.equal(seen.input, prompt)
+      assert.ok(!seen.args.includes(prompt) || prompt === '-p' || prompt === '--help' || prompt === '')
+    }
+    for (const agent of ['antigravity', 'opencode'] as HeadlessAgent[]) {
+      const seen = JSON.parse((await runHeadless({ agent, prompt, cwd: home, bin: echo, ctx })).text) as { input: string; args: string[] }
+      assert.equal(seen.input, '')
+      assert.equal(agent === 'antigravity' ? seen.args[1] : seen.args.at(-1), prompt)
+    }
+  }
+})
+
+test('KIT_HEADLESS reaches the child even when the caller env says otherwise', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const echo = await fakeHarness(home, 'echo.cjs', ARGS_ECHO)
+  const read = async (env: NodeJS.ProcessEnv | undefined, ctxEnv: NodeJS.ProcessEnv = {}) => {
+    const result = await runHeadless({ agent: 'claude', prompt: 'p', cwd: home, bin: echo, ctx: sandbox(home, ctxEnv), ...(env ? { env } : {}) })
+    return JSON.parse(result.text) as { headless: string; marker?: string }
+  }
+  assert.equal((await read(undefined)).headless, '1')
+  assert.equal((await read(undefined, { KIT_HEADLESS: '0' })).headless, '1')
+  const custom = await read({ PATH: process.env['PATH'] ?? '', KIT_HEADLESS: '0', KIT_MARKER: 'm' })
+  assert.equal(custom.headless, '1')
+  assert.equal(custom.marker, 'm')
+})
+
+test('gemini gets its trust variable and the child never sees the harness-specific env of other agents', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const echo = await fakeHarness(home, 'echo.cjs', `console.log(JSON.stringify({ response: JSON.stringify({ trust: process.env.GEMINI_CLI_TRUST_WORKSPACE, headless: process.env.KIT_HEADLESS }) }))`)
+  const gemini = JSON.parse((await runHeadless({ agent: 'gemini', prompt: 'p', cwd: home, bin: echo, ctx: sandbox(home) })).text) as { trust?: string; headless: string }
+  assert.deepEqual(gemini, { trust: 'true', headless: '1' })
+})
+
+test('a timeout kills the whole child and reports partial output', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const stubborn = await fakeHarness(home, 'stubborn.cjs', `process.stdout.write('partial'); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`)
+  const pids: number[] = []
+  const started = Date.now()
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: stubborn, ctx, timeoutMs: 1500, onSpawn: (pid) => pids.push(pid) }), (error: unknown) => {
+    assert.ok(error instanceof HeadlessError)
+    assert.equal(error.code, 'TIMEOUT')
+    assert.equal(error.stdout, 'partial')
+    assert.match(error.message, /1500 ms/)
+    return true
+  })
+  assert.ok(Date.now() - started < 10_000)
+  assert.throws(() => process.kill(pids[0] ?? 0, 0))
+})
+
+test('an already aborted signal never spawns, and a late abort does nothing after success', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home)
+  const echo = await fakeHarness(home, 'echo.cjs', ARGS_ECHO)
+  const spawned: number[] = []
+  const aborted = AbortSignal.abort()
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: echo, ctx, signal: aborted, onSpawn: (pid) => spawned.push(pid) }), failure('FAILED', /aborted/))
+  assert.equal(spawned.length, 0)
+  const controller = new AbortController()
+  const result = await runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: echo, ctx, signal: controller.signal })
+  controller.abort()
+  assert.equal(result.sessionId, 's')
+})
+
+test('pickHeadlessAgent follows the default order, skips the preferred one once and finds nothing without binaries', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const bin = path.join(home, 'bin')
+  await mkdir(bin)
+  for (const name of ['codex', 'agy']) await fakeHarness(bin, name, '')
+  const ctx = sandbox(home, { PATH: bin })
+  assert.deepEqual(await pickHeadlessAgent(undefined, { ctx }), { agent: 'codex', bin: path.join(bin, 'codex'), fallback: false })
+  assert.deepEqual(await pickHeadlessAgent('claude', { ctx }), { agent: 'codex', bin: path.join(bin, 'codex'), fallback: true })
+  assert.deepEqual(await pickHeadlessAgent('codex', { ctx }), { agent: 'codex', bin: path.join(bin, 'codex'), fallback: false })
+  assert.deepEqual(await pickHeadlessAgent('antigravity', { ctx }), { agent: 'antigravity', bin: path.join(bin, 'agy'), fallback: false })
+  assert.equal(await pickHeadlessAgent(null, { ctx, order: [] }), null)
+  assert.equal(await pickHeadlessAgent('claude', { ctx, order: ['claude'] }), null)
+})
