@@ -354,3 +354,64 @@ test('a parent that exits takes its headless children with it', { skip: process.
   await new Promise((resolve) => setTimeout(resolve, 200))
   assert.throws(() => process.kill(pid, 0))
 })
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+  test(`${signal} to the parent kills the headless child group and still ends the parent`, { skip: process.platform === 'win32' }, async (t) => {
+    const home = await tempDir(t)
+    const sleeper = path.join(home, 'fake-claude')
+    await writeFile(sleeper, '#!/bin/sh\nexec sleep 300\n')
+    await chmod(sleeper, 0o755)
+    const pidFile = path.join(home, 'pid')
+    const parent = path.join(home, 'parent.mts')
+    const source = path.join(import.meta.dirname, '..', 'src', 'agents', 'index.ts')
+    await writeFile(parent, `import { writeFileSync } from 'node:fs'\nimport { runHeadless } from ${JSON.stringify(source)}\nrunHeadless({ agent: 'claude', prompt: 'x', cwd: ${JSON.stringify(home)}, bin: ${JSON.stringify(sleeper)}, onSpawn: (pid) => writeFileSync(${JSON.stringify(pidFile)}, String(pid)) }).catch(() => {})\n`)
+    const { spawn } = await import('node:child_process')
+    const child = spawn(process.execPath, [parent], { stdio: 'ignore' })
+    const exited = new Promise<NodeJS.Signals | null>((resolve) => child.once('exit', (_code, sig) => resolve(sig)))
+    let pid = 0
+    for (let attempt = 0; attempt < 100 && pid === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      pid = Number(await readFile(pidFile, 'utf8').catch(() => '0'))
+    }
+    assert.ok(pid > 0)
+    process.kill(pid, 0)
+    child.kill(signal)
+    assert.equal(await exited, signal)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.throws(() => process.kill(pid, 0))
+  })
+}
+
+test('signal handlers are registered only while children are alive', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const slow = await fakeHarness(home, 'slow.cjs', `setTimeout(() => console.log(JSON.stringify({ result: 'ok' })), 300)`)
+  const before = ['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => process.listenerCount(signal))
+  const pending = runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: slow, ctx: sandbox(home) })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.deepEqual(['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => process.listenerCount(signal)), before.map((count) => count + 1))
+  await pending
+  assert.deepEqual(['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => process.listenerCount(signal)), before)
+})
+
+test('antigravity keeps a useful response even when it also reports an error', () => {
+  assert.deepEqual(parseHeadlessOutput('antigravity', '{"status":"SUCCESS","response":"Done.","error":"tool timeout","conversation_id":"c"}'), { text: 'Done.', sessionId: 'c' })
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"status":"SUCCESS","response":"  ","error":"tool timeout"}'), failure('FAILED', /tool timeout/))
+  assert.throws(() => parseHeadlessOutput('antigravity', '{"status":"ERROR","response":"partial","error":"quota"}'), failure('FAILED', /quota/))
+})
+
+test('unset removes variables without regard to case on Windows', async (t) => {
+  const home = await tempDir(t)
+  const echo = await fakeHarness(home, 'echo.cjs', `console.log(JSON.stringify({ response: String(Object.keys(process.env).some((key) => key.toUpperCase() === 'GEMINI_CLI_TRUST_WORKSPACE')) }))`)
+  const env = { ...sandbox(home).env, gemini_cli_trust_workspace: 'true', ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\x86', NUMBER_OF_PROCESSORS: '8' }
+  const kept = headlessEnv('gemini', env)
+  assert.ok(['ProgramFiles', 'ProgramFiles(x86)', 'NUMBER_OF_PROCESSORS'].every((key) => key in kept))
+  if (process.platform !== 'win32') {
+    const unix = await runHeadless({ agent: 'gemini', prompt: 'p', cwd: home, bin: echo, ctx: platformContext({ ...sandbox(home), env }) })
+    assert.equal(unix.text, 'true')
+    const direct = path.join(home, 'direct.cjs')
+    await writeFile(direct, `#!${process.execPath}\nconsole.log(JSON.stringify({ response: String(Object.keys(process.env).some((key) => key.toUpperCase() === 'GEMINI_CLI_TRUST_WORKSPACE')) }))\n`)
+    await chmod(direct, 0o755)
+    const windows = await runHeadless({ agent: 'gemini', prompt: 'p', cwd: home, bin: direct, ctx: platformContext({ platform: 'win32', home, env }) })
+    assert.equal(windows.text, 'false')
+  }
+})
