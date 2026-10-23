@@ -50,14 +50,14 @@ test('which finds executables in extra directories', async (t) => {
 })
 
 test('spawnSpec wraps batch files in cmd.exe with escaped arguments', () => {
-  const win = platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: { ComSpec: 'C:\\Windows\\system32\\cmd.exe' } })
+  const win = platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: { ComSpec: 'C:\\evil\\cmd.exe', SystemRoot: 'D:\\Win' } })
   const spec = spawnSpec('C:\\Users\\a\\AppData\\Roaming\\npm\\claude.cmd', ['-p', 'a b', 'x"y&z', 'trail\\'], win)
-  assert.equal(spec.command, 'C:\\Windows\\system32\\cmd.exe')
+  assert.equal(spec.command, 'D:\\Win\\System32\\cmd.exe')
   assert.equal(spec.windowsVerbatimArguments, true)
   assert.deepEqual(spec.args.slice(0, 3), ['/d', '/s', '/c'])
   assert.equal(spec.args[3], '"C:\\Users\\a\\AppData\\Roaming\\npm\\claude.cmd ^^^"-p^^^" ^^^"a^^^ b^^^" ^^^"x\\^^^"y^^^&z^^^" ^^^"trail\\\\^^^""')
   assert.equal(spawnSpec('C:\\Program Files\\tool\\x.BAT', [], win).args[3], '"C:\\Program^ Files\\tool\\x.BAT"')
-  assert.equal(spawnSpec('x.cmd', [], platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: {} })).command, 'cmd.exe')
+  assert.equal(spawnSpec('x.cmd', [], platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: {} })).command, 'C:\\Windows\\System32\\cmd.exe')
   assert.deepEqual(spawnSpec('C:\\bin\\agy.exe', ['a b'], win), { command: 'C:\\bin\\agy.exe', args: ['a b'], windowsVerbatimArguments: false })
   assert.deepEqual(spawnSpec('/usr/bin/x.cmd', ['a'], platformContext({ platform: 'linux', home: '/h', env: {} })), { command: '/usr/bin/x.cmd', args: ['a'], windowsVerbatimArguments: false })
 })
@@ -70,11 +70,16 @@ test('run still executes plain commands after adopting spawnSpec', { skip: proce
 test('notifications use the native tool of each platform and never throw', async (t) => {
   const mac = notifyCommand('Ti"tle', 'Bo$dy', platformContext({ platform: 'darwin', home: '/h', env: {} }))
   assert.equal(mac.command, 'osascript')
-  assert.deepEqual(mac.args.slice(-2), ['Ti"tle', 'Bo$dy'])
+  assert.deepEqual(mac.args.slice(-3), ['--', 'Ti"tle', 'Bo$dy'])
+  const long = notifyCommand('t'.repeat(300), 'b'.repeat(3000), platformContext({ platform: 'darwin', home: '/h', env: {} }))
+  assert.equal(long.args.at(-2)?.length, 256)
+  assert.equal(long.args.at(-1)?.length, 2000)
   assert.ok(mac.args.includes('on run argv'))
   assert.deepEqual(notifyCommand('T', '-B', platformContext({ platform: 'linux', home: '/h', env: {} })), { command: 'notify-send', args: ['--', 'T', '-B'] })
+  assert.deepEqual(notifyCommand('<b>x</b>', 'a & b', platformContext({ platform: 'linux', home: '/h', env: {} })).args, ['--', '&lt;b&gt;x&lt;/b&gt;', 'a &amp; b'])
   const win = notifyCommand("it's", 'ü & <x>', platformContext({ platform: 'win32', home: 'C:\\h', env: {} }))
   assert.equal(win.command, 'powershell.exe')
+  assert.ok(!win.args.includes('Bypass'))
   assert.equal(win.args.at(-2), '-EncodedCommand')
   const script = Buffer.from(win.args.at(-1) ?? '', 'base64').toString('utf16le')
   assert.match(script, /ToastNotificationManager/)
@@ -129,10 +134,10 @@ test('spawnSpec neutralizes cmd metacharacters in hostile prompts', () => {
   }
 })
 
-test('spawnSpec keeps line breaks out of the cmd.exe command line', { todo: 'cmd.exe truncates the command line at the first line break' }, () => {
+test('spawnSpec refuses line breaks that cmd.exe would cut', () => {
   const win = platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: {} })
   for (const prompt of ['first\nsecond', 'first\r\nsecond']) {
-    assert.doesNotMatch(spawnSpec('C:\\x\\agy.cmd', ['-p', prompt], win).args[3] ?? '', /[\r\n]/)
+    assert.throws(() => spawnSpec('C:\\x\\agy.cmd', ['-p', prompt], win), /line breaks/)
   }
 })
 
