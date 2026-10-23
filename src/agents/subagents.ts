@@ -117,12 +117,13 @@ const ANTIGRAVITY_ORDER = [
 export function subagentForAntigravity(markdown: string, fallbackName: string): string {
   const agent = parseSubagent(markdown, 'antigravity', fallbackName)
   const header = ['---', `name: ${agent.name}`, `description: ${JSON.stringify(agent.description)}`]
+  let tools = ANTIGRAVITY_ORDER
   if (agent.tools !== null && agent.tools.length > 0 && !agent.tools.includes('*')) {
     const mapped = new Set(agent.tools.flatMap((tool) => ANTIGRAVITY_TOOLS[tool] ?? []))
-    const tools = ANTIGRAVITY_ORDER.filter((tool) => mapped.has(tool))
+    tools = ANTIGRAVITY_ORDER.filter((tool) => mapped.has(tool))
     if (tools.length === 0) throw new Error(`subagent ${agent.name}: none of its tools (${agent.tools.join(', ')}) exist in antigravity`)
-    header.push(`tools: [${tools.join(', ')}]`)
   }
+  header.push(`tools: [${tools.join(', ')}]`)
   header.push('model: inherit', '---')
   return `${header.join('\n')}\n${agent.body}`
 }

@@ -76,8 +76,6 @@ test('subagents convert to antigravity markdown with mapped tools', () => {
     subagentForAntigravity(subagent('Write, Bash, WebSearch, Edit, MultiEdit, WebFetch, TodoWrite, Agent'), 'x'),
     /\ntools: \[run_command, replace_file_content, multi_replace_file_content, write_to_file, read_url_content, search_web\]\n/,
   )
-  assert.doesNotMatch(subagentForAntigravity(subagent('*'), 'x'), /tools:/)
-  assert.doesNotMatch(subagentForAntigravity('---\nname: x\ndescription: X\n---\nBody.\n', 'x'), /tools:/)
   assert.throws(() => subagentForAntigravity(subagent('Skill, Task, NotebookEdit'), 'x'), /none of its tools/)
 })
 
@@ -286,10 +284,18 @@ test('tool mapping covers every entry, drops unsupported tools and keeps a fixed
   assert.match(mixed, /\ntools: \[view_file, list_dir, grep_search, search_web\]\n/)
   assert.doesNotMatch(mixed, /Skill|Agent|Task|NotebookEdit|TodoWrite|Unknown/)
   assert.match(subagentForAntigravity(subagent('Read, Skill'), 'x'), /\ntools: \[view_file, list_dir\]\n/)
-  assert.doesNotMatch(subagentForAntigravity(subagent('Read, *'), 'x'), /tools:/)
-  assert.doesNotMatch(subagentForAntigravity(subagent(''), 'x'), /tools:/)
   assert.throws(() => subagentForAntigravity(subagent('Skill, Unknown'), 'x'), /none of its tools/)
   assert.throws(() => subagentForAntigravity(subagent('Agent'), 'x'), /none of its tools/)
+})
+
+test('unrestricted subagents get the full antigravity tool list', () => {
+  const full =
+    '\ntools: [view_file, list_dir, grep_search, find_by_name, run_command, replace_file_content, multi_replace_file_content, write_to_file, read_url_content, search_web]\nmodel: inherit\n'
+  assert.ok(subagentForAntigravity('---\nname: x\ndescription: X\n---\nBody.\n', 'x').includes(full))
+  assert.ok(subagentForAntigravity(subagent(''), 'x').includes(full))
+  assert.ok(subagentForAntigravity(subagent('*'), 'x').includes(full))
+  assert.ok(subagentForAntigravity(subagent('Read, *'), 'x').includes(full))
+  assert.ok(subagentForAntigravity(subagent('*, Skill'), 'x').includes(full))
 })
 
 test('the plugin tree holds real files and reinstalls when the rendered plugin differs from the installed one', async (t) => {
