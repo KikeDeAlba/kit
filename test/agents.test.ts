@@ -188,6 +188,9 @@ test('detected mode only installs into agents that are present', async (t) => {
     gemini: path.join(home, '.gemini'),
   }
   await mkdir(homes.gemini, { recursive: true })
+  const none = await installIntegration(integration, { ctx, homes, locate: async () => null })
+  assert.deepEqual(none, [])
+  await mkdir(path.join(homes.gemini, 'extensions'), { recursive: true })
   const steps = await installIntegration(integration, { ctx, homes, locate: async () => null })
   assert.deepEqual([...new Set(steps.map((step) => step.agent))], ['gemini'])
   assert.ok(!existsSync(homes.claude))

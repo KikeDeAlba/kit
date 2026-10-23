@@ -311,5 +311,5 @@ test('user skills become commands for codex and gemini and are removed on uninst
 test('edit tool matchers cover every agent', () => {
   assert.equal(EDIT_TOOL_MATCHERS.claude, 'Edit|Write|MultiEdit')
   assert.match(EDIT_TOOL_MATCHERS.codex, /apply_patch/)
-  assert.deepEqual(Object.keys(EDIT_TOOL_MATCHERS).sort(), ['claude', 'codex', 'gemini', 'opencode'])
+  assert.deepEqual(Object.keys(EDIT_TOOL_MATCHERS).sort(), ['antigravity', 'claude', 'codex', 'gemini', 'opencode'])
 })

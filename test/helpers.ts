@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises'
+import { chmod, cp, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { platformContext, type PlatformContext } from '../src/platform.ts'
@@ -41,3 +41,44 @@ if (command === 'capabilities') {
 if (json) console.log(envelope(false, command ?? '', { error: { code: 'UNKNOWN_COMMAND', message: 'unknown' } }))
 process.exit(2)
 `
+
+export interface FakeAgy {
+  calls: string[]
+  exec: (command: string, args: readonly string[]) => Promise<string | void>
+  locate: (command: string) => Promise<string | null>
+}
+
+export function fakeAgy(homes: { antigravity: string }, options: { validate?: Error } = {}): FakeAgy {
+  const calls: string[] = []
+  const plugins = path.join(homes.antigravity, 'plugins')
+  return {
+    calls,
+    locate: async (command) => (command === 'agy' ? '/bin/agy' : null),
+    exec: async (command, args) => {
+      if (command !== '/bin/agy') throw new Error(`unexpected command ${command}`)
+      calls.push(args.join(' '))
+      const [verb, action, target] = args
+      if (verb !== 'plugin') throw new Error(`unknown agy command ${args.join(' ')}`)
+      if (action === 'list') {
+        const names = await readdir(plugins).catch(() => [] as string[])
+        return JSON.stringify(names.map((name) => ({ name, path: path.join(plugins, name) })))
+      }
+      if (action === 'validate') {
+        if (options.validate) throw options.validate
+        return JSON.stringify({ ok: true })
+      }
+      if (action === 'install' && target) {
+        const manifest = JSON.parse(await readFile(path.join(target, 'plugin.json'), 'utf8')) as { name: string }
+        const destination = path.join(plugins, manifest.name)
+        await rm(destination, { recursive: true, force: true })
+        await cp(target, destination, { recursive: true })
+        return ''
+      }
+      if (action === 'uninstall' && target) {
+        await rm(path.join(plugins, target), { recursive: true, force: true })
+        return ''
+      }
+      throw new Error(`unknown agy command ${args.join(' ')}`)
+    },
+  }
+}

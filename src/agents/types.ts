@@ -1,7 +1,8 @@
 import type { PlatformContext } from '../platform.ts'
 
-export const AGENTS = ['claude', 'opencode', 'codex', 'gemini', 'claude-desktop'] as const
+export const AGENTS = ['claude', 'opencode', 'codex', 'gemini', 'antigravity', 'claude-desktop'] as const
 export type AgentName = (typeof AGENTS)[number]
+export type MemoryAgent = Exclude<AgentName, 'claude-desktop'>
 
 export interface HookCommand {
   type: 'command'
@@ -50,6 +51,7 @@ export interface AgentIntegration {
   opencode?: { plugins?: CommandSource[] }
   codex?: { hooks?: HookMap }
   gemini?: { hooks?: HookMap; contextFile?: string }
+  antigravity?: { rules?: string }
   claudeDesktop?: { mcp?: McpServer[] }
 }
 
@@ -69,6 +71,7 @@ export interface AgentHomes {
   codex: string
   agentsSkills: string
   gemini: string
+  antigravity: string
   claudeDesktop: string | null
 }
 
@@ -90,9 +93,10 @@ export interface ClaudePluginSpec {
   scope?: 'user' | 'project' | 'local'
 }
 
-export const EDIT_TOOL_MATCHERS: Record<Exclude<AgentName, 'claude-desktop'>, string> = {
+export const EDIT_TOOL_MATCHERS: Record<MemoryAgent, string> = {
   claude: 'Edit|Write|MultiEdit',
   codex: 'apply_patch|Edit|Write',
   opencode: 'edit|write|patch',
   gemini: 'write_file|replace',
+  antigravity: 'replace_file_content|multi_replace_file_content|write_to_file',
 }
