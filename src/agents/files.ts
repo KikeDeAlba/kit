@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { copyFile, cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { HookGroup, HookMap } from './types.ts'
 
@@ -58,11 +58,12 @@ export async function readJsonFile(file: string): Promise<{ value: Record<string
   }
 }
 
-export async function writeJsonFile(file: string, value: unknown, backup: boolean): Promise<void> {
+export async function writeJsonFile(file: string, value: unknown, backup: boolean, options: { mode?: number } = {}): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true })
   if (backup && existsSync(file)) await copyFile(file, `${file}.backup`)
   const temporary = `${file}.${process.pid}.tmp`
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`)
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, options.mode === undefined ? {} : { mode: options.mode })
+  if (options.mode !== undefined) await chmod(temporary, options.mode)
   await rename(temporary, file)
 }
 

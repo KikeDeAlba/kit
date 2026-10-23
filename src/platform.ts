@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process'
-import { constants } from 'node:fs'
+import { accessSync, constants, statSync } from 'node:fs'
 import { access, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -80,11 +80,12 @@ export function defaultSearchDirs(ctx: PlatformContext = platformContext()): str
   return dirs
 }
 
-export function searchPath(ctx: PlatformContext = platformContext(), extra: readonly string[] = []): string {
+export function searchPath(ctx: PlatformContext = platformContext(), extra: readonly string[] = [], trailing: readonly string[] = []): string {
   const fromEnv = (ctx.env[pathKey(ctx.env)] ?? '').split(pathDelimiter(ctx)).filter((dir) => dir.length > 0)
   const seen = new Set<string>()
   const ordered: string[] = []
-  for (const dir of [...extra, ...fromEnv, ...defaultSearchDirs(ctx)]) {
+  for (const dir of [...extra, ...fromEnv, ...defaultSearchDirs(ctx), ...trailing]) {
+    if (dir.length === 0) continue
     if (seen.has(dir)) continue
     seen.add(dir)
     ordered.push(dir)
@@ -111,16 +112,71 @@ async function isExecutable(file: string, ctx: PlatformContext): Promise<boolean
   }
 }
 
-export async function which(command: string, ctx: PlatformContext = platformContext(), extraDirs: readonly string[] = []): Promise<string | null> {
+function isExecutableSync(file: string, ctx: PlatformContext): boolean {
+  try {
+    if (!statSync(file).isFile()) return false
+    if (ctx.platform === 'win32') return true
+    accessSync(file, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function whichCandidates(command: string, ctx: PlatformContext, extraDirs: readonly string[], trailingDirs: readonly string[]): string[] {
   const p = pathApi(ctx)
-  if (p.isAbsolute(command)) return (await isExecutable(command, ctx)) ? command : null
-  for (const dir of searchPath(ctx, extraDirs).split(pathDelimiter(ctx))) {
-    for (const name of executableNames(command, ctx)) {
-      const candidate = p.join(dir, name)
-      if (await isExecutable(candidate, ctx)) return candidate
-    }
+  return searchPath(ctx, extraDirs, trailingDirs)
+    .split(pathDelimiter(ctx))
+    .flatMap((dir) => executableNames(command, ctx).map((name) => p.join(dir, name)))
+}
+
+export async function which(
+  command: string,
+  ctx: PlatformContext = platformContext(),
+  extraDirs: readonly string[] = [],
+  trailingDirs: readonly string[] = [],
+): Promise<string | null> {
+  if (pathApi(ctx).isAbsolute(command)) return (await isExecutable(command, ctx)) ? command : null
+  for (const candidate of whichCandidates(command, ctx, extraDirs, trailingDirs)) {
+    if (await isExecutable(candidate, ctx)) return candidate
   }
   return null
+}
+
+export function whichSync(
+  command: string,
+  ctx: PlatformContext = platformContext(),
+  extraDirs: readonly string[] = [],
+  trailingDirs: readonly string[] = [],
+): string | null {
+  if (pathApi(ctx).isAbsolute(command)) return isExecutableSync(command, ctx) ? command : null
+  return whichCandidates(command, ctx, extraDirs, trailingDirs).find((candidate) => isExecutableSync(candidate, ctx)) ?? null
+}
+
+export interface SpawnSpec {
+  command: string
+  args: string[]
+  windowsVerbatimArguments: boolean
+}
+
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g
+
+function quoteForCmd(arg: string): string {
+  const quoted = `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1')}"`
+  return quoted.replace(CMD_META, '^^^$1')
+}
+
+export function windowsSystemCommand(name: string, ctx: PlatformContext = platformContext()): string {
+  const root = ctx.env['SystemRoot'] ?? ctx.env['SYSTEMROOT'] ?? ctx.env['windir'] ?? ctx.env['WINDIR'] ?? 'C:\\Windows'
+  return path.win32.join(root, 'System32', name)
+}
+
+export function spawnSpec(command: string, args: readonly string[], ctx: PlatformContext = platformContext()): SpawnSpec {
+  if (ctx.platform !== 'win32' || !/\.(cmd|bat)$/i.test(command)) return { command, args: [...args], windowsVerbatimArguments: false }
+  if (args.some((arg) => /[\r\n]/.test(arg))) throw new Error(`cannot pass line breaks to ${path.win32.basename(command)}: cmd.exe cuts the command line at the first one`)
+  const line = [path.win32.normalize(command).replace(CMD_META, '^$1'), ...args.map(quoteForCmd)].join(' ')
+  const shell = windowsSystemCommand('cmd.exe', ctx)
+  return { command: shell, args: ['/d', '/s', '/c', `"${line}"`], windowsVerbatimArguments: true }
 }
 
 export function childEnvironment(ctx: PlatformContext = platformContext(), extraDirs: readonly string[] = [], extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -167,23 +223,24 @@ export async function run(
   args: readonly string[],
   options: { env?: NodeJS.ProcessEnv; cwd?: string; timeoutMs?: number; input?: string } = {},
 ): Promise<RunResult> {
+  const spec = spawnSpec(command, args)
   if (options.input === undefined) {
-    const { stdout, stderr } = await promisify(execFile)(command, [...args], {
+    const { stdout, stderr } = await promisify(execFile)(spec.command, spec.args, {
       env: withRuntimePath(options.env ?? process.env),
       cwd: options.cwd,
       timeout: options.timeoutMs ?? 60_000,
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
-      shell: needsShell(command),
+      windowsVerbatimArguments: spec.windowsVerbatimArguments,
     })
     return { stdout, stderr }
   }
   return new Promise<RunResult>((resolve, reject) => {
-    const child = spawn(command, [...args], {
+    const child = spawn(spec.command, spec.args, {
       env: withRuntimePath(options.env ?? process.env),
       cwd: options.cwd,
       windowsHide: true,
-      shell: needsShell(command),
+      windowsVerbatimArguments: spec.windowsVerbatimArguments,
     })
     let stdout = ''
     let stderr = ''
@@ -204,6 +261,58 @@ export async function run(
   })
 }
 
-function needsShell(command: string): boolean {
-  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)
+const WINDOWS_TOAST_APP = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+function powershellText(value: string): string {
+  return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(value, 'utf8').toString('base64')}'))`
+}
+
+export const NOTIFY_TITLE_LIMIT = 256
+export const NOTIFY_BODY_LIMIT = 2000
+
+function clip(value: string, limit: number): string {
+  const chars = Array.from(value)
+  return chars.length > limit ? chars.slice(0, limit).join('') : value
+}
+
+function escapeMarkup(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+export function notifyCommand(rawTitle: string, rawBody: string, ctx: PlatformContext = platformContext()): { command: string; args: string[] } {
+  const title = clip(rawTitle, NOTIFY_TITLE_LIMIT)
+  const body = clip(rawBody, NOTIFY_BODY_LIMIT)
+  if (ctx.platform === 'darwin') {
+    return {
+      command: 'osascript',
+      args: ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv)', '-e', 'end run', '--', title, body],
+    }
+  }
+  if (ctx.platform === 'win32') {
+    const script = [
+      '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null',
+      '$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)',
+      "$texts = $template.GetElementsByTagName('text')",
+      `$texts.Item(0).AppendChild($template.CreateTextNode(${powershellText(title)})) > $null`,
+      `$texts.Item(1).AppendChild($template.CreateTextNode(${powershellText(body)})) > $null`,
+      `[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${WINDOWS_TOAST_APP}').Show([Windows.UI.Notifications.ToastNotification]::new($template))`,
+    ].join('\n')
+    return { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')] }
+  }
+  return { command: 'notify-send', args: ['--', escapeMarkup(title), escapeMarkup(body)] }
+}
+
+export async function notify(title: string, body: string, options: { ctx?: PlatformContext; timeoutMs?: number } = {}): Promise<boolean> {
+  try {
+    const ctx = options.ctx ?? platformContext()
+    const { command, args } = notifyCommand(title, body, ctx)
+    const resolved = await which(command, ctx)
+    if (!resolved) return false
+    await new Promise<void>((resolve, reject) => {
+      execFile(resolved, args, { timeout: options.timeoutMs ?? 10_000, windowsHide: true, env: ctx.env }, (error) => (error ? reject(error) : resolve()))
+    })
+    return true
+  } catch {
+    return false
+  }
 }

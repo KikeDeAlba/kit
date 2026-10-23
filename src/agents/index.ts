@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs'
-import { lstat, mkdir, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { configHome, dataHome, pathKey, platformContext, run, which, withRuntimePath, type PlatformContext } from '../platform.ts'
+import { AGENT_BINARIES, agentForBinary, findAgentBinary } from './binaries.ts'
 import {
   copyInto,
   linkPath,
@@ -55,8 +56,13 @@ export {
   MEMORY_FILES,
 } from './subagents.ts'
 export { mergeHooks, stripHooks } from './files.ts'
+export * from './binaries.ts'
+export * from './headless.ts'
 
-const BINARIES: Record<AgentName, string | null> = { claude: 'claude', opencode: 'opencode', codex: 'codex', gemini: 'gemini', antigravity: 'agy', 'claude-desktop': null }
+async function locateBinary(command: string, ctx: PlatformContext): Promise<string | null> {
+  const agent = agentForBinary(command)
+  return agent ? findAgentBinary(agent, { ctx }) : which(command, ctx)
+}
 
 function claudeDesktopHome(ctx: PlatformContext, join: (...parts: string[]) => string): string | null {
   if (ctx.platform === 'darwin') return join(ctx.home, 'Library', 'Application Support', 'Claude')
@@ -80,7 +86,7 @@ export function agentHomes(ctx: PlatformContext = platformContext(), overrides: 
 export async function detectAgents(
   ctx: PlatformContext = platformContext(),
   homes: AgentHomes = agentHomes(ctx),
-  locate: (command: string) => Promise<string | null> = (command) => which(command, ctx),
+  locate: (command: string) => Promise<string | null> = (command) => locateBinary(command, ctx),
 ): Promise<AgentName[]> {
   const found: AgentName[] = []
   const configDir: Record<AgentName, string | null> = {
@@ -93,7 +99,7 @@ export async function detectAgents(
   }
   for (const agent of AGENTS) {
     const dir = configDir[agent]
-    const binary = BINARIES[agent]
+    const binary = AGENT_BINARIES[agent]
     if ((dir !== null && existsSync(dir)) || (binary !== null && (await locate(binary)) !== null)) found.push(agent)
   }
   return found
@@ -256,7 +262,7 @@ async function defaultExec(command: string, args: readonly string[]): Promise<st
 }
 
 function locator(options: InstallOptions, ctx: PlatformContext): (command: string) => Promise<string | null> {
-  return options.locate ?? ((command: string) => which(command, ctx))
+  return options.locate ?? ((command: string) => locateBinary(command, ctx))
 }
 
 async function installClaude(integration: AgentIntegration, homes: AgentHomes, options: InstallOptions, ctx: PlatformContext): Promise<Step[]> {
@@ -646,9 +652,7 @@ async function installAntigravity(integration: AgentIntegration, homes: AgentHom
   if ((integration.commands ?? []).length > 0) {
     steps.push({ agent: 'antigravity', item: 'commands', state: 'skipped', detail: 'commands are not supported for antigravity' })
   }
-  if (!options.skipMcp && (integration.mcp ?? []).length > 0) {
-    steps.push({ agent: 'antigravity', item: 'mcp', state: 'skipped', detail: 'MCP servers are not supported for antigravity' })
-  }
+  if (!options.skipMcp && (integration.mcp ?? []).length > 0) steps.push(await editAntigravityMcp(integration.mcp ?? [], homes, integration.tool, 'install'))
   if (rendered) steps.push(await installAntigravityPlugin(integration, root, options, ctx))
   return steps
 }
@@ -667,6 +671,76 @@ async function uninstallAntigravityPlugin(integration: AgentIntegration, options
     if (listed === null && /not (?:installed|found)/i.test(errorText(error))) return { agent: 'antigravity', item: 'plugin', state: 'skipped', detail: `plugin ${tool} is not installed` }
     return { agent: 'antigravity', item: 'plugin', state: 'failed', detail: `agy plugin uninstall failed: ${reason(error)}` }
   }
+}
+
+export const ANTIGRAVITY_MCP_MARKER = '_kit'
+
+function antigravityMcpEntry(server: McpServer, tool: string): Record<string, unknown> {
+  if ('url' in server) return { serverUrl: server.url, ...(server.headers ? { headers: server.headers } : {}), disabled: false, [ANTIGRAVITY_MCP_MARKER]: tool }
+  const [command, ...args] = server.command
+  return { command, args, ...(server.env ? { env: server.env } : {}), disabled: false, [ANTIGRAVITY_MCP_MARKER]: tool }
+}
+
+function canonicalMcpEntry(value: unknown): string {
+  const record = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+  const kept = Object.entries(record).filter(([, entry]) => {
+    if (Array.isArray(entry)) return entry.length > 0
+    if (typeof entry === 'object' && entry !== null) return Object.keys(entry).length > 0
+    return true
+  })
+  return JSON.stringify(Object.fromEntries(kept.sort(([a], [b]) => a.localeCompare(b))))
+}
+
+function ownsMcpEntry(value: unknown, tool: string, wanted?: Record<string, unknown>): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record[ANTIGRAVITY_MCP_MARKER] === tool) return true
+  if (record[ANTIGRAVITY_MCP_MARKER] !== undefined || !wanted) return false
+  return canonicalMcpEntry({ ...record, [ANTIGRAVITY_MCP_MARKER]: tool }) === canonicalMcpEntry(wanted)
+}
+
+async function editAntigravityMcp(servers: readonly McpServer[], homes: AgentHomes, tool: string, mode: 'install' | 'remove'): Promise<Step> {
+  const item = `mcp ${servers.map((server) => server.name).join(', ')}`
+  const file = path.join(homes.antigravity, 'mcp_config.json')
+  if (mode === 'remove' && !existsSync(file)) return { agent: 'antigravity', item, state: 'skipped', detail: `nothing at ${file}`, path: file }
+  const info = await stat(file).catch(() => null)
+  const blank = info !== null && (await readFile(file, 'utf8')).trim().length === 0
+  const loaded = blank ? { value: {} as Record<string, unknown>, existed: false } : await readJsonFile(file)
+  if ('error' in loaded) return { agent: 'antigravity', item, state: 'failed', detail: `${loaded.error}; left alone`, path: file }
+  const value = loaded.value
+  const current = typeof value['mcpServers'] === 'object' && value['mcpServers'] !== null && !Array.isArray(value['mcpServers']) ? (value['mcpServers'] as Record<string, unknown>) : {}
+  const next = { ...current }
+  const foreign: string[] = []
+  let changed = false
+  for (const server of servers) {
+    const existing = current[server.name]
+    const wanted = antigravityMcpEntry(server, tool)
+    if (existing !== undefined && !ownsMcpEntry(existing, tool, wanted)) {
+      if (mode === 'install') foreign.push(server.name)
+      continue
+    }
+    if (mode === 'remove') {
+      if (existing !== undefined) {
+        delete next[server.name]
+        changed = true
+      }
+      continue
+    }
+    if (existing !== undefined && canonicalMcpEntry(existing) === canonicalMcpEntry(wanted) && ownsMcpEntry(existing, tool)) continue
+    next[server.name] = wanted
+    changed = true
+  }
+  const conflict = foreign.length > 0 ? `; left ${foreign.join(', ')} alone because ${foreign.length === 1 ? 'it is' : 'they are'} not managed by ${tool}` : ''
+  if (!changed) {
+    if (mode === 'remove') return { agent: 'antigravity', item, state: 'skipped', detail: `not registered in ${file}`, path: file }
+    if (foreign.length === servers.length) return { agent: 'antigravity', item, state: 'skipped', detail: `conflict in ${file}${conflict}`, path: file }
+    return { agent: 'antigravity', item, state: 'present', detail: `already registered in ${file}${conflict}`, path: file }
+  }
+  value['mcpServers'] = next
+  await writeJsonFile(file, value, loaded.existed, { mode: info ? info.mode & 0o777 : 0o600 })
+  return mode === 'remove'
+    ? { agent: 'antigravity', item, state: 'removed', detail: `removed from ${file}`, path: file }
+    : { agent: 'antigravity', item, state: 'installed', detail: `registered in ${file}${conflict}`, path: file }
 }
 
 function claudeDesktopEntry(server: McpServer, ctx: PlatformContext): Record<string, unknown> {
@@ -815,7 +889,10 @@ export async function uninstallIntegration(integration: AgentIntegration, option
         await rm(root, { recursive: true, force: true })
         steps.push(removed(agent, 'extension', ok, root))
       }
-      if (agent === 'antigravity') steps.push(await uninstallAntigravityPlugin(integration, options, ctx))
+      if (agent === 'antigravity') {
+        steps.push(await uninstallAntigravityPlugin(integration, options, ctx))
+        if ((integration.mcp ?? []).length > 0) steps.push(await editAntigravityMcp(integration.mcp ?? [], homes, integration.tool, 'remove'))
+      }
       if (agent === 'claude-desktop') steps.push(await editClaudeDesktopMcp(integration, homes, options, ctx, 'remove'))
     } catch (error) {
       steps.push({ agent, item: 'integration', state: 'failed', detail: reason(error) })
