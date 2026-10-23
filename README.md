@@ -147,7 +147,9 @@ se escriben directo en `<homes.antigravity>/mcp_config.json`, sin pasar por
 `{ serverUrl, headers?, disabled: false, _kit: "<herramienta>" }`. `_kit` marca la
 entrada como propia: `agy` lo conserva al reescribir el archivo. Si ya hay una
 entrada con el mismo nombre sin esa marca, no se pisa y el paso sale `skipped`
-con el conflicto en `detail`. Las demás claves del archivo se conservan, la
+con el conflicto en `detail`. La excepción es una entrada sin marca idéntica a la
+que kit escribiría (de una instalación anterior): se adopta y se le pone la
+marca. Las demás claves del archivo se conservan, la
 escritura es atómica, conserva el modo del archivo (o `0600` si es nuevo) y deja
 `mcp_config.json.backup`. Un archivo vacío cuenta como `{}`; uno con JSON
 inválido no se toca y el paso sale `failed`. `uninstallIntegration` quita solo
@@ -183,8 +185,11 @@ if (picked.fallback) console.warn(`usando ${picked.agent}`)
 const { text, sessionId } = await agents.runHeadless({ agent: picked.agent, bin: picked.bin, prompt, cwd, access: 'read' })
 ```
 
-El prompt va por stdin en todos los agentes salvo `agy`, que no lo lee y lo recibe
-como `--print=<prompt>`, así un prompt que empieza con `-` no se toma como flag.
+El prompt va por stdin en todos los agentes salvo `agy`, que no lee stdin y lo
+recibe por argv como `--print=<prompt>`. Así un prompt que empieza con `-` no se
+toma como flag, pero en agy el prompt queda visible en la lista de procesos
+(`ps`) y, si `agy` es un `.cmd` en Windows, aplican los límites de `cmd.exe`
+(ver la tabla de errores).
 
 | Agente | Invocación | `access: 'read'` (por omisión) | `access: 'write'` | Respuesta |
 |---|---|---|---|---|
@@ -194,8 +199,10 @@ como `--print=<prompt>`, así un prompt que empieza con `-` no se toma como flag
 | antigravity | `agy --print=<prompt> --output-format json [--model m]` | `--mode plan` | `--dangerously-skip-permissions` | `response`, `conversation_id` |
 | opencode | `opencode run --format json [-m proveedor/modelo]` | `--agent plan` | agente por omisión | `part.text` de los eventos `text`, unidos; `sessionID` |
 
-`extraArgs` va después de los flags de acceso. Si `agy` deja `response` vacío y
-reporta `denied_actions`, la corrida falla con `FAILED`.
+`extraArgs` va después de los flags de acceso. En agy cuenta la respuesta: si
+`response` trae texto y `status` no es `ERROR`, la corrida es buena aunque traiga
+`error` o `denied_actions`. Sin texto útil, falla con `FAILED` y el mensaje sale
+de `error`, de `status` o de las acciones denegadas.
 
 El hijo no hereda todo el entorno. `headlessEnv(agent, env)` filtra con una lista
 blanca común, y bita, recap e inkwell pueden usarla para lo mismo:
@@ -206,8 +213,11 @@ blanca común, y bita, recap e inkwell pueden usarla para lo mismo:
   minúsculas), `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` y
   `REQUESTS_CA_BUNDLE`.
 - Windows: `USERPROFILE`, `USERNAME`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`,
-  `LOCALAPPDATA`, `PROGRAMDATA`, `SystemRoot`, `SystemDrive`, `WINDIR`, `ComSpec` y
-  `PATHEXT`.
+  `LOCALAPPDATA`, `PROGRAMDATA`, `ALLUSERSPROFILE`, `ProgramFiles`,
+  `ProgramFiles(x86)`, `ProgramW6432`, `CommonProgramFiles`, `SystemRoot`,
+  `SystemDrive`, `WINDIR`, `ComSpec`, `PATHEXT`, `PROCESSOR_ARCHITECTURE` y
+  `NUMBER_OF_PROCESSORS`. En Windows los nombres se comparan sin distinguir
+  mayúsculas, también al quitar variables como `GEMINI_CLI_TRUST_WORKSPACE`.
 
 A eso se suman solo los prefijos del agente que corre:
 
@@ -219,18 +229,23 @@ A eso se suman solo los prefijos del agente que corre:
 | antigravity | `ANTIGRAVITY_`, `GEMINI_` | |
 | opencode | `OPENCODE_` | |
 
-Así claude no ve `OPENAI_API_KEY` ni codex `ANTHROPIC_API_KEY`. Las claves de
-proveedor que use opencode hay que pasarlas en `env`: lo que se pase ahí se
-agrega encima y gana. Al final se fija `KIT_HEADLESS=1`, que los hooks de bita y
+Así claude no ve `OPENAI_API_KEY` ni codex `ANTHROPIC_API_KEY`. opencode solo
+recibe `OPENCODE_*`: sus credenciales salen de `opencode auth login` o se pasan en
+`env`. Lo que el llamador pase en `env` se agrega encima del filtro y gana, así que
+puede reintroducir cualquier variable, incluso una que el filtro quitó; esa
+decisión es de quien llama. Al final se fija `KIT_HEADLESS=1`, que los hooks de bita y
 gaze respetan para no registrar esa sesión, y se pone la carpeta del binario al
 principio del `PATH`.
 
 El tiempo límite por omisión es de 10 minutos. Al vencer, o al abortar con
 `signal`, se mata el árbol de procesos: en unix el hijo corre en su propio grupo
-y se manda `SIGTERM` y luego `SIGKILL` al grupo, y si el proceso padre sale
-mientras hay hijos vivos, un manejador de `exit` mata sus grupos (`liveHeadlessGroups`
-los lista); en Windows se usa
-`%SystemRoot%\System32\taskkill.exe /T /F`.
+y se manda `SIGTERM` y luego `SIGKILL` al grupo; en Windows se usa
+`%SystemRoot%\System32\taskkill.exe /T /F`. En unix, mientras haya hijos vivos
+(`liveHeadlessGroups` los lista), kit escucha `exit`, `SIGINT`, `SIGTERM` y
+`SIGHUP` del proceso padre y mata sus grupos. Si nadie más escucha esa señal, se
+quita su manejador y la vuelve a mandar al padre, que termina como lo haría sin
+kit. Al terminar el último hijo quita todos los manejadores. Un `SIGKILL` al padre
+no se puede atrapar.
 
 Los fallos lanzan `HeadlessError` con un `code`, además de `exitCode`, `stdout`
 y `stderr`:
@@ -399,16 +414,22 @@ listo para `spawn`. En Windows un `.cmd` o `.bat` se envuelve en
 `%SystemRoot%\System32\cmd.exe /d /s /c` con cada argumento entre comillas y los
 metacaracteres escapados, así un argumento con `&`, `|` o comillas no se
 interpreta como comando. Un argumento con saltos de línea lanza un error, porque
-`cmd.exe` corta ahí la línea. En los demás casos devuelve el comando tal cual. `run` lo usa en vez de
-`shell: true`. `whichSync` es la versión síncrona de `which`, y las dos aceptan
+`cmd.exe` corta ahí la línea. En los demás casos devuelve el comando tal cual.
+
+`run` usa `spawnSpec`. Esto cambia su comportamiento en Windows respecto a 0.6:
+antes corría los `.cmd`/`.bat` con `shell: true` y sin escapar, y ahora pasan
+por `%SystemRoot%\System32\cmd.exe` (no por `ComSpec`) con los argumentos
+escapados. Un argumento con saltos de línea ahora lanza un error en vez de
+cortarse. `whichSync` es la versión síncrona de `which`, y las dos aceptan
 un cuarto argumento con carpetas que se buscan después de `defaultSearchDirs`.
 
-`notify(título, cuerpo)` muestra una notificación del sistema y devuelve `true` o
+`notify(título, cuerpo)` (nuevo en 0.7) muestra una notificación del sistema y devuelve `true` o
 `false`, nunca lanza. El título se recorta a 256 caracteres y el cuerpo a 2000. En
 macOS usa `osascript` con el texto por `argv` después de `--`, en Linux
 `notify-send` con `<`, `>` y `&` escapados, y en Windows un toast de PowerShell
-con `-EncodedCommand`.
-`notifyCommand` da el comando sin ejecutarlo.
+con `-EncodedCommand`. El texto va en base64 dentro del script y no se salta la
+política de ejecución (`-ExecutionPolicy` no se toca). `notifyCommand` da el
+comando sin ejecutarlo.
 
 ### 5. Credenciales
 
