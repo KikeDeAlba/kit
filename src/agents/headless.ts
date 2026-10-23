@@ -18,7 +18,9 @@ export interface HeadlessOptions {
   model?: string
   timeoutMs?: number
   access?: 'read' | 'write'
+  tools?: readonly string[]
   extraArgs?: readonly string[]
+  maxOutputBytes?: number
   env?: NodeJS.ProcessEnv
   bin?: string
   ctx?: PlatformContext
@@ -63,6 +65,8 @@ export interface HeadlessInvocation {
 }
 
 export const HEADLESS_DEFAULT_TIMEOUT_MS = 600_000
+export const HEADLESS_DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+export const CLAUDE_READ_TOOLS: readonly string[] = ['Read', 'Grep', 'Glob']
 export const WINDOWS_COMMAND_LINE_LIMIT = 8191
 
 export const HEADLESS_ENV_ALLOWLIST: readonly string[] = [
@@ -151,17 +155,24 @@ export function headlessEnvironment(agent: HeadlessAgent, base: NodeJS.ProcessEn
   return { ...headlessEnv(agent, { ...base, ...extra }), ...extra }
 }
 
+function claudeTools(tools: readonly string[] | undefined, write: boolean): string[] {
+  if (tools === undefined) return write ? [] : ['--strict-mcp-config', '--tools', CLAUDE_READ_TOOLS.join(',')]
+  const names = tools.map((tool) => tool.trim()).filter((tool) => tool.length > 0)
+  if (names.length === 0) return ['--strict-mcp-config', '--tools', CLAUDE_READ_TOOLS.join(','), '--disallowedTools', CLAUDE_READ_TOOLS.join(',')]
+  return ['--strict-mcp-config', '--tools', names.join(',')]
+}
+
 export function headlessInvocation(
   agent: HeadlessAgent,
-  options: { prompt: string; cwd: string; model?: string; access?: 'read' | 'write'; extraArgs?: readonly string[] },
+  options: { prompt: string; cwd: string; model?: string; access?: 'read' | 'write'; tools?: readonly string[]; extraArgs?: readonly string[] },
 ): HeadlessInvocation {
   const write = options.access === 'write'
   const extra = [...(options.extraArgs ?? [])]
   const model = (flag: string) => (options.model ? [flag, options.model] : [])
   const stdin = options.prompt
   if (agent === 'claude') {
-    const access = write ? ['--permission-mode', 'acceptEdits'] : ['--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user']
-    return { args: ['-p', '--output-format', 'json', ...access, ...model('--model'), ...extra], stdin, env: {} }
+    const access = write ? ['--permission-mode', 'acceptEdits'] : ['--permission-mode', 'plan', '--setting-sources', 'user']
+    return { args: ['-p', '--output-format', 'json', ...claudeTools(options.tools, write), ...access, ...model('--model'), ...extra], stdin, env: {} }
   }
   if (agent === 'codex') {
     return {
@@ -179,7 +190,11 @@ export function headlessInvocation(
     }
   }
   if (agent === 'antigravity') {
-    return { args: [`--print=${options.prompt}`, '--output-format', 'json', ...model('--model'), ...(write ? ['--dangerously-skip-permissions'] : ['--mode', 'plan']), ...extra], env: {} }
+    return {
+      args: ['--input-format', 'stream-json', '--output-format', 'stream-json', ...model('--model'), ...(write ? ['--dangerously-skip-permissions'] : ['--mode', 'plan']), ...extra, '-p='],
+      stdin: `${JSON.stringify({ event: 'user', message: { content: options.prompt } })}\n`,
+      env: {},
+    }
   }
   return { args: ['run', '--format', 'json', ...(write ? [] : ['--agent', 'plan']), ...model('-m'), ...extra], stdin, env: {} }
 }
@@ -303,13 +318,59 @@ function antigravityFailure(payload: Record<string, unknown>): string | undefine
   return undefined
 }
 
+function parseAntigravity(stdout: string): { text: string; sessionId?: string } {
+  let sessionId: string | undefined
+  let payload: Record<string, unknown> | null = null
+  let failure: string | undefined
+  let deltas: { step: unknown; text: string }[] = []
+  for (const event of jsonLines(stdout)) {
+    sessionId = text(event['conversation_id']) || sessionId
+    const kind = event['event']
+    if (kind === 'result') {
+      const result = asRecord(event['result'])
+      if (!result) continue
+      if (!text(result['response'])?.trim() && deltas.length > 0) payload = { ...result, response: joinDeltas(deltas) }
+      else payload = result
+      deltas = []
+    } else if (kind === 'error') {
+      failure = errorMessage(event['error']) ?? errorMessage(event['message']) ?? JSON.stringify(event)
+    } else if (kind === 'step_update') {
+      const step = asRecord(event['step_update'])
+      const delta = text(step?.['text_delta'])
+      if (step?.['step_type'] === 'agent_response' && delta) deltas.push({ step: step['step_index'], text: delta })
+    }
+  }
+  if (!payload && deltas.length > 0 && failure === undefined) payload = { response: joinDeltas(deltas) }
+  if (!payload) {
+    if (failure !== undefined) throw new HeadlessError('FAILED', 'antigravity', `antigravity reported an error: ${failure}`, { stdout })
+    throw new HeadlessError('PARSE', 'antigravity', 'antigravity printed no result event', { stdout })
+  }
+  sessionId = text(payload['conversation_id']) || sessionId
+  const problem = antigravityFailure(payload) ?? (failure !== undefined && !text(payload['response'])?.trim() ? failure : undefined)
+  if (problem !== undefined) throw new HeadlessError('FAILED', 'antigravity', `antigravity reported an error: ${problem}`, { stdout })
+  const answer = text(payload['response'])
+  if (answer === undefined) throw new HeadlessError('PARSE', 'antigravity', 'antigravity result has no "response" field', { stdout })
+  return sessionId ? { text: answer, sessionId } : { text: answer }
+}
+
+function joinDeltas(deltas: readonly { step: unknown; text: string }[]): string {
+  let answer = ''
+  let previous: unknown = deltas[0]?.step
+  for (const delta of deltas) {
+    if (delta.step !== previous && answer.length > 0) answer += '\n\n'
+    answer += delta.text
+    previous = delta.step
+  }
+  return answer
+}
+
 export function parseHeadlessOutput(agent: HeadlessAgent, stdout: string): { text: string; sessionId?: string } {
   if (!isHeadlessAgent(agent)) throw new HeadlessError('UNAVAILABLE', agent, `${String(agent)} is not a headless agent`, { stdout })
   if (agent === 'claude') {
     return parseSingle(agent, stdout, 'result', 'session_id', (payload) => (payload['is_error'] === true ? (text(payload['result']) ?? text(payload['subtype']) ?? 'error') : undefined))
   }
   if (agent === 'gemini') return parseSingle(agent, stdout, 'response', 'session_id', (payload) => (payload['error'] !== undefined && payload['response'] === undefined ? errorMessage(payload['error']) : undefined))
-  if (agent === 'antigravity') return parseSingle(agent, stdout, 'response', 'conversation_id', antigravityFailure)
+  if (agent === 'antigravity') return parseAntigravity(stdout)
   if (agent === 'codex') return parseCodex(stdout)
   return parseOpenCode(stdout)
 }
@@ -400,6 +461,13 @@ function killTree(child: ChildProcess, ctx: PlatformContext): void {
   }, 3000).unref()
 }
 
+function tailBuffer(bytes: Buffer, limit: number): Buffer {
+  if (bytes.length <= limit) return bytes
+  let start = bytes.length - limit
+  while (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start++
+  return bytes.subarray(start)
+}
+
 function stderrSummary(stderr: string): string {
   const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
   return lines.find((line) => line.includes('Error')) ?? lines.at(-1) ?? ''
@@ -441,9 +509,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
       windowsVerbatimArguments: spec.windowsVerbatimArguments,
       detached: ctx.platform !== 'win32',
     })
-    let stdout = ''
-    let stderr = ''
-    let reason: 'timeout' | 'aborted' | null = null
+    const stdoutChunks: Buffer[] = []
+    let stderrChunks: Buffer[] = []
+    let reason: 'timeout' | 'aborted' | 'overflow' | null = null
+    let stdoutBytes = 0
+    let stderrBytes = 0
+    const maxOutputBytes = options.maxOutputBytes ?? HEADLESS_DEFAULT_MAX_OUTPUT_BYTES
     let settled = false
     const finish = (fn: () => void) => {
       if (settled) return
@@ -469,17 +540,37 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
     child.once('exit', () => {
       if (group !== undefined) untrackGroup(group)
     })
-    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk))
-    child.stderr?.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk))
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (reason === 'overflow') return
+      if (reason === null) {
+        stdoutBytes += chunk.length
+        if (stdoutBytes > maxOutputBytes) {
+          reason = 'overflow'
+          killTree(child, ctx)
+          return
+        }
+      }
+      stdoutChunks.push(chunk)
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrChunks.push(chunk)
+      stderrBytes += chunk.length
+      if (stderrBytes < 2 * maxOutputBytes) return
+      stderrChunks = [tailBuffer(Buffer.concat(stderrChunks), maxOutputBytes)]
+      stderrBytes = stderrChunks[0]?.length ?? 0
+    })
+    const output = () => ({ stdout: Buffer.concat(stdoutChunks).toString('utf8'), stderr: tailBuffer(Buffer.concat(stderrChunks), maxOutputBytes).toString('utf8') })
     child.once('error', (error: NodeJS.ErrnoException) => {
       const code = error.code === 'E2BIG' ? 'PROMPT_TOO_LONG' : 'UNAVAILABLE'
-      finish(() => reject(new HeadlessError(code, agent, `could not start ${bin}: ${error.message}`, { stdout, stderr })))
+      finish(() => reject(new HeadlessError(code, agent, `could not start ${bin}: ${error.message}`, output())))
     })
     child.once('close', (code) => {
       finish(() => {
+        const { stdout, stderr } = output()
         const details = { exitCode: code, stdout, stderr }
         if (reason === 'timeout') return reject(new HeadlessError('TIMEOUT', agent, `${agent} did not finish within ${options.timeoutMs ?? HEADLESS_DEFAULT_TIMEOUT_MS} ms`, details))
         if (reason === 'aborted') return reject(new HeadlessError('FAILED', agent, `${agent} run was aborted`, details))
+        if (reason === 'overflow') return reject(new HeadlessError('FAILED', agent, `${agent} printed more than ${maxOutputBytes} bytes on stdout and was stopped; raise maxOutputBytes if that much output is expected`, details))
         let parsed: { text: string; sessionId?: string }
         try {
           parsed = parseHeadlessOutput(agent, stdout)
