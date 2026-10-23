@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { test } from 'node:test'
-import { HeadlessError, headlessInvocation, parseHeadlessOutput, pickHeadlessAgent, runHeadless, type HeadlessAgent } from '../src/agents/index.ts'
+import { HeadlessError, headlessEnv, headlessEnvironment, headlessInvocation, isHeadlessAgent, parseHeadlessOutput, pickHeadlessAgent, runHeadless, type HeadlessAgent } from '../src/agents/index.ts'
 import { platformContext } from '../src/platform.ts'
 import { sandbox, tempDir } from './helpers.ts'
 
@@ -23,7 +23,7 @@ test('parses the JSON output of every harness', async () => {
   assert.deepEqual(parseHeadlessOutput('claude', await fixture('claude.json')), { text: 'Resumen listo.', sessionId: '6f1c2a5e-1111-4a2b-9c3d-000000000001' })
   assert.deepEqual(parseHeadlessOutput('codex', await fixture('codex.jsonl')), { text: 'Final answer.', sessionId: '0199a213-81c0-7800-8aa1-bbab2a035a53' })
   assert.deepEqual(parseHeadlessOutput('gemini', await fixture('gemini.json')), { text: 'Hola {desde} gemini.\n{no es json}', sessionId: 'b3c1d2e4-2222-4f00-8000-000000000003' })
-  assert.deepEqual(parseHeadlessOutput('antigravity', await fixture('antigravity.json')), { text: 'Listo desde agy.', sessionId: 'c0ffee00-3333-4000-8000-000000000005' })
+  assert.deepEqual(parseHeadlessOutput('antigravity', await fixture('antigravity.json')), { text: 'OK\n', sessionId: '49156f6b-9013-4da5-96c9-92efe16b0285' })
   assert.deepEqual(parseHeadlessOutput('opencode', await fixture('opencode.jsonl')), { text: 'OK\n\nSecond message.', sessionId: 'ses_e99277354ffeVY91vRD90IQUTu' })
 })
 
@@ -40,25 +40,63 @@ test('harness errors and garbage are reported with a code', async () => {
   assert.throws(() => parseHeadlessOutput('opencode', opencodeError), failure('FAILED', /No API key/))
   assert.throws(() => parseHeadlessOutput('opencode', ''), failure('PARSE'))
   assert.throws(() => parseHeadlessOutput('antigravity', '{"conversation_id":"x"}'), failure('PARSE'))
+  const denied = await fixture('antigravity-denied.json')
+  assert.throws(() => parseHeadlessOutput('antigravity', denied), failure('FAILED', /permission denied for write_file/))
+  const agyError = await fixture('antigravity-error.json')
+  assert.throws(() => parseHeadlessOutput('antigravity', agyError), failure('FAILED', /empty prompt/))
+  assert.deepEqual(parseHeadlessOutput('antigravity', '{"response":"done","conversation_id":"c","denied_actions":[{"action":"run_command"}]}'), { text: 'done', sessionId: 'c' })
+  assert.throws(() => parseHeadlessOutput('nope' as HeadlessAgent, '{}'), failure('UNAVAILABLE'))
   const codexFailed = await fixture('codex-failed.jsonl')
   assert.throws(() => parseHeadlessOutput('codex', codexFailed), failure('FAILED', /usage limit/))
 })
 
 test('each harness gets its own flags, sandbox and prompt channel', () => {
-  const base = { prompt: 'hello', cwd: '/work' }
-  assert.deepEqual(headlessInvocation('claude', { ...base, model: 'sonnet' }), { args: ['-p', '--output-format', 'json', '--model', 'sonnet'], stdin: 'hello', env: {} })
+  const base = { prompt: '- hello', cwd: '/work' }
+  const claudeRead = headlessInvocation('claude', { ...base, model: 'sonnet', extraArgs: ['--verbose'] })
+  assert.deepEqual(claudeRead, {
+    args: ['-p', '--output-format', 'json', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'sonnet', '--verbose'],
+    stdin: '- hello',
+    env: {},
+  })
+  assert.deepEqual(headlessInvocation('claude', { ...base, access: 'write', extraArgs: ['--verbose'] }).args, ['-p', '--output-format', 'json', '--permission-mode', 'acceptEdits', '--verbose'])
   assert.deepEqual(headlessInvocation('codex', base).args, ['exec', '--json', '-C', '/work', '--skip-git-repo-check', '--sandbox', 'read-only', '-'])
   assert.deepEqual(headlessInvocation('codex', { ...base, access: 'write', model: 'o3' }).args, ['exec', '--json', '-C', '/work', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-m', 'o3', '-'])
   const gemini = headlessInvocation('gemini', base)
   assert.deepEqual(gemini.args, ['-o', 'json', '--approval-mode', 'plan'])
-  assert.equal(gemini.stdin, 'hello')
-  assert.equal(gemini.env['GEMINI_CLI_TRUST_WORKSPACE'], 'true')
-  assert.deepEqual(headlessInvocation('gemini', { ...base, access: 'write' }).args, ['-o', 'json', '--approval-mode', 'yolo'])
+  assert.equal(gemini.stdin, '- hello')
+  assert.equal(gemini.env['GEMINI_CLI_TRUST_WORKSPACE'], undefined)
+  const geminiWrite = headlessInvocation('gemini', { ...base, access: 'write' })
+  assert.deepEqual(geminiWrite.args, ['-o', 'json', '--approval-mode', 'auto_edit'])
+  assert.equal(geminiWrite.env['GEMINI_CLI_TRUST_WORKSPACE'], 'true')
   const agy = headlessInvocation('antigravity', base)
-  assert.deepEqual(agy.args, ['-p', 'hello', '--output-format', 'json'])
+  assert.deepEqual(agy.args, ['--print=- hello', '--output-format', 'json'])
   assert.equal(agy.stdin, undefined)
-  assert.deepEqual(headlessInvocation('antigravity', { ...base, access: 'write', model: 'm' }).args, ['-p', 'hello', '--output-format', 'json', '--model', 'm', '--dangerously-skip-permissions'])
-  assert.deepEqual(headlessInvocation('opencode', { ...base, model: 'anthropic/claude', extraArgs: ['--agent', 'plan'] }).args, ['run', '--format', 'json', '-m', 'anthropic/claude', '--agent', 'plan', 'hello'])
+  assert.deepEqual(headlessInvocation('antigravity', { ...base, access: 'write', model: 'm' }).args, ['--print=- hello', '--output-format', 'json', '--model', 'm', '--dangerously-skip-permissions'])
+  const opencode = headlessInvocation('opencode', { ...base, model: 'anthropic/claude' })
+  assert.deepEqual(opencode.args, ['run', '--format', 'json', '--agent', 'plan', '-m', 'anthropic/claude'])
+  assert.equal(opencode.stdin, '- hello')
+  assert.deepEqual(headlessInvocation('opencode', { ...base, access: 'write' }).args, ['run', '--format', 'json'])
+})
+
+test('the child environment is an allowlist plus the agent prefixes', () => {
+  const base = { PATH: '/bin', HOME: '/h', LC_ALL: 'C', XDG_CONFIG_HOME: '/x', NVM_DIR: '/n', SECRET_TOKEN: 's', AWS_SECRET_ACCESS_KEY: 'a', ANTHROPIC_API_KEY: 'k', OPENAI_API_KEY: 'o', GEMINI_API_KEY: 'g', Path: '/win' }
+  assert.deepEqual(Object.keys(headlessEnvironment('claude', base)).sort(), ['ANTHROPIC_API_KEY', 'HOME', 'LC_ALL', 'NVM_DIR', 'PATH', 'Path', 'XDG_CONFIG_HOME'])
+  assert.ok(!('ANTHROPIC_API_KEY' in headlessEnvironment('codex', base)))
+  assert.ok('OPENAI_API_KEY' in headlessEnvironment('codex', base))
+  assert.ok('GEMINI_API_KEY' in headlessEnvironment('antigravity', base))
+  assert.ok(!('OPENAI_API_KEY' in headlessEnvironment('claude', base)))
+  assert.ok('CLAUDE_CODE_USE_BEDROCK' in headlessEnvironment('claude', { CLAUDE_CODE_USE_BEDROCK: '1' }))
+  assert.ok(!('GOOGLE_API_KEY' in headlessEnvironment('antigravity', { GOOGLE_API_KEY: 'g' })))
+  const gemini = headlessEnvironment('gemini', { GOOGLE_API_KEY: 'g', GOOGLE_APPLICATION_CREDENTIALS: '/sa.json' })
+  assert.deepEqual(gemini, { GOOGLE_API_KEY: 'g' })
+  assert.equal(headlessEnvironment('gemini', { GOOGLE_APPLICATION_CREDENTIALS: '/sa.json' }, { GOOGLE_APPLICATION_CREDENTIALS: '/explicit.json' })['GOOGLE_APPLICATION_CREDENTIALS'], '/explicit.json')
+  const opencode = headlessEnvironment('opencode', { ...base, OPENCODE_CONFIG: '/c' }, { EXTRA: '1', ANTHROPIC_API_KEY: 'explicit' })
+  assert.deepEqual(Object.keys(opencode).filter((key) => /_API_KEY$|^OPENCODE_|^EXTRA$/.test(key)).sort(), ['ANTHROPIC_API_KEY', 'EXTRA', 'OPENCODE_CONFIG'])
+  assert.equal(opencode['ANTHROPIC_API_KEY'], 'explicit')
+  assert.ok(!('SECRET_TOKEN' in opencode) && !('AWS_SECRET_ACCESS_KEY' in opencode))
+  assert.equal(isHeadlessAgent('claude'), true)
+  assert.equal(isHeadlessAgent('claude-desktop'), false)
+  assert.equal(isHeadlessAgent(undefined), false)
 })
 
 async function fakeHarness(dir: string, name: string, body: string): Promise<string> {
@@ -85,7 +123,7 @@ test('runHeadless spawns the harness with the prompt on stdin and KIT_HEADLESS s
   const result = await runHeadless({ agent: 'claude', prompt: 'summarize this', cwd: home, bin: claude, model: 'haiku', ctx: sandbox(home), onSpawn: (pid) => pids.push(pid) })
   const seen = JSON.parse(result.text) as { input: string; args: string[]; headless: string; path: string; cwd: string }
   assert.equal(seen.input, 'summarize this')
-  assert.deepEqual(seen.args, ['-p', '--output-format', 'json', '--model', 'haiku'])
+  assert.deepEqual(seen.args, ['-p', '--output-format', 'json', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'haiku'])
   assert.equal(seen.headless, '1')
   assert.equal(seen.path, bin)
   assert.equal(await realpath(seen.cwd), await realpath(home))
@@ -119,12 +157,15 @@ test('runHeadless maps exits, timeouts, aborts and missing binaries to error cod
   await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: path.join(home, 'missing'), ctx }), failure('UNAVAILABLE'))
 })
 
-test('long prompts passed as arguments through cmd.exe are refused on Windows', async () => {
+test('prompts passed as arguments through cmd.exe are refused on Windows when they cannot survive', async (t) => {
+  const home = await tempDir(t)
   const ctx = platformContext({ platform: 'win32', home: 'C:\\Users\\a', env: {} })
-  const prompt = 'x'.repeat(8001)
-  for (const agent of ['antigravity', 'opencode'] as HeadlessAgent[]) {
-    await assert.rejects(runHeadless({ agent, prompt, cwd: 'C:\\work', bin: `C:\\Users\\a\\AppData\\Roaming\\npm\\${agent}.cmd`, ctx }), failure('PROMPT_TOO_LONG'))
-  }
+  const bin = 'C:\\Users\\a\\AppData\\Roaming\\npm\\agy.cmd'
+  await assert.rejects(runHeadless({ agent: 'antigravity', prompt: 'x'.repeat(8200), cwd: home, bin, ctx }), failure('PROMPT_TOO_LONG', /8191/))
+  await assert.rejects(runHeadless({ agent: 'antigravity', prompt: '&'.repeat(2500), cwd: home, bin, ctx }), failure('PROMPT_TOO_LONG'))
+  await assert.rejects(runHeadless({ agent: 'antigravity', prompt: 'one\ntwo', cwd: home, bin, ctx }), failure('FAILED', /line break/))
+  await assert.rejects(runHeadless({ agent: 'nope' as HeadlessAgent, prompt: 'x', cwd: home, bin, ctx }), failure('UNAVAILABLE'))
+  await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: path.join(home, 'missing'), bin: process.execPath, ctx: sandbox(home) }), failure('FAILED', /does not exist/))
 })
 
 test('pickHeadlessAgent honors the preference and reports a fallback', { skip: process.platform === 'win32' }, async (t) => {
@@ -164,16 +205,14 @@ test('prompts with dashes, quotes, shell characters and line breaks arrive untou
   const ctx = sandbox(home)
   const echo = await fakeHarness(home, 'echo.cjs', CHANNEL_ECHO)
   for (const prompt of AWKWARD_PROMPTS) {
-    for (const agent of ['claude', 'codex', 'gemini'] as HeadlessAgent[]) {
+    for (const agent of ['claude', 'codex', 'gemini', 'opencode'] as HeadlessAgent[]) {
       const seen = JSON.parse((await runHeadless({ agent, prompt, cwd: home, bin: echo, ctx })).text) as { input: string; args: string[] }
       assert.equal(seen.input, prompt)
       assert.ok(!seen.args.includes(prompt) || prompt === '-p' || prompt === '--help' || prompt === '')
     }
-    for (const agent of ['antigravity', 'opencode'] as HeadlessAgent[]) {
-      const seen = JSON.parse((await runHeadless({ agent, prompt, cwd: home, bin: echo, ctx })).text) as { input: string; args: string[] }
-      assert.equal(seen.input, '')
-      assert.equal(agent === 'antigravity' ? seen.args[1] : seen.args.at(-1), prompt)
-    }
+    const seen = JSON.parse((await runHeadless({ agent: 'antigravity', prompt, cwd: home, bin: echo, ctx })).text) as { input: string; args: string[] }
+    assert.equal(seen.input, '')
+    assert.equal(seen.args[0], `--print=${prompt}`)
   }
 })
 
@@ -191,11 +230,16 @@ test('KIT_HEADLESS reaches the child even when the caller env says otherwise', {
   assert.equal(custom.marker, 'm')
 })
 
-test('gemini gets its trust variable and the child never sees the harness-specific env of other agents', { skip: process.platform === 'win32' }, async (t) => {
+test('gemini trusts the workspace only for writes and the child never sees the env of other agents', { skip: process.platform === 'win32' }, async (t) => {
   const home = await tempDir(t)
-  const echo = await fakeHarness(home, 'echo.cjs', `console.log(JSON.stringify({ response: JSON.stringify({ trust: process.env.GEMINI_CLI_TRUST_WORKSPACE, headless: process.env.KIT_HEADLESS }) }))`)
-  const gemini = JSON.parse((await runHeadless({ agent: 'gemini', prompt: 'p', cwd: home, bin: echo, ctx: sandbox(home) })).text) as { trust?: string; headless: string }
-  assert.deepEqual(gemini, { trust: 'true', headless: '1' })
+  const echo = await fakeHarness(home, 'echo.cjs', `console.log(JSON.stringify({ response: JSON.stringify({ trust: process.env.GEMINI_CLI_TRUST_WORKSPACE, headless: process.env.KIT_HEADLESS, openai: process.env.OPENAI_API_KEY, secret: process.env.SECRET_TOKEN, google: process.env.GOOGLE_API_KEY }) }))`)
+  const ctx = sandbox(home, { GEMINI_CLI_TRUST_WORKSPACE: 'true', OPENAI_API_KEY: 'o', SECRET_TOKEN: 's', GOOGLE_API_KEY: 'g' })
+  const read = JSON.parse((await runHeadless({ agent: 'gemini', prompt: 'p', cwd: home, bin: echo, ctx })).text) as Record<string, string | undefined>
+  assert.deepEqual(read, { headless: '1', google: 'g' })
+  const write = JSON.parse((await runHeadless({ agent: 'gemini', prompt: 'p', cwd: home, bin: echo, ctx, access: 'write' })).text) as Record<string, string | undefined>
+  assert.deepEqual(write, { trust: 'true', headless: '1', google: 'g' })
+  const explicit = JSON.parse((await runHeadless({ agent: 'gemini', prompt: 'p', cwd: home, bin: echo, ctx, env: { SECRET_TOKEN: 'mine' } })).text) as Record<string, string | undefined>
+  assert.equal(explicit['secret'], 'mine')
 })
 
 test('a timeout kills the whole child and reports partial output', { skip: process.platform === 'win32' }, async (t) => {
@@ -241,4 +285,43 @@ test('pickHeadlessAgent follows the default order, skips the preferred one once 
   assert.deepEqual(await pickHeadlessAgent('antigravity', { ctx }), { agent: 'antigravity', bin: path.join(bin, 'agy'), fallback: false })
   assert.equal(await pickHeadlessAgent(null, { ctx, order: [] }), null)
   assert.equal(await pickHeadlessAgent('claude', { ctx, order: ['claude'] }), null)
+})
+
+test('a real child of claude never receives the keys of other providers', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const echo = await fakeHarness(home, 'echo.cjs', `process.stdin.resume(); process.stdin.on('end', () => console.log(JSON.stringify({ result: JSON.stringify({ openai: process.env.OPENAI_API_KEY ?? null, anthropic: process.env.ANTHROPIC_API_KEY ?? null, gac: process.env.GOOGLE_APPLICATION_CREDENTIALS ?? null }) })))`)
+  const ctx = sandbox(home, { OPENAI_API_KEY: 'o', ANTHROPIC_API_KEY: 'a', GOOGLE_APPLICATION_CREDENTIALS: '/sa.json' })
+  assert.deepEqual(JSON.parse((await runHeadless({ agent: 'claude', prompt: 'p', cwd: home, bin: echo, ctx })).text), { openai: null, anthropic: 'a', gac: null })
+})
+
+test('headlessEnv keeps proxies and CAs and opens cloud credentials only when the agent is told to use them', () => {
+  const base = {
+    PATH: '/bin',
+    HTTPS_PROXY: 'http://proxy:3128',
+    https_proxy: 'http://proxy:3128',
+    no_proxy: 'localhost',
+    ALL_PROXY: 'socks5://p',
+    NODE_EXTRA_CA_CERTS: '/ca.pem',
+    SSL_CERT_FILE: '/cert.pem',
+    SSL_CERT_DIR: '/certs',
+    REQUESTS_CA_BUNDLE: '/bundle.pem',
+    OPENAI_API_KEY: 'o',
+    AWS_ACCESS_KEY_ID: 'aws',
+    GOOGLE_APPLICATION_CREDENTIALS: '/sa.json',
+    CLOUD_ML_REGION: 'us-east5',
+    ANTHROPIC_VERTEX_PROJECT_ID: 'p',
+  }
+  const claude = headlessEnv('claude', base)
+  for (const key of ['HTTPS_PROXY', 'https_proxy', 'no_proxy', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE']) assert.ok(key in claude, key)
+  assert.ok(!('OPENAI_API_KEY' in claude))
+  assert.ok(!('AWS_ACCESS_KEY_ID' in claude))
+  assert.ok(!('GOOGLE_APPLICATION_CREDENTIALS' in claude) && !('CLOUD_ML_REGION' in claude))
+  assert.ok('AWS_ACCESS_KEY_ID' in headlessEnv('claude', { ...base, CLAUDE_CODE_USE_BEDROCK: '1' }))
+  const vertex = headlessEnv('claude', { ...base, CLAUDE_CODE_USE_VERTEX: '1' })
+  assert.ok(['GOOGLE_APPLICATION_CREDENTIALS', 'CLOUD_ML_REGION', 'ANTHROPIC_VERTEX_PROJECT_ID'].every((key) => key in vertex))
+  assert.ok(!('AWS_ACCESS_KEY_ID' in vertex))
+  assert.ok(!('GOOGLE_APPLICATION_CREDENTIALS' in headlessEnv('gemini', base)))
+  assert.ok('GOOGLE_APPLICATION_CREDENTIALS' in headlessEnv('gemini', { ...base, GOOGLE_GENAI_USE_VERTEXAI: 'true' }))
+  assert.ok(!('GOOGLE_APPLICATION_CREDENTIALS' in headlessEnv('gemini', { ...base, GOOGLE_GENAI_USE_VERTEXAI: 'false' })))
+  assert.ok('HTTPS_PROXY' in headlessEnv('opencode', base) && !('OPENAI_API_KEY' in headlessEnv('opencode', base)))
 })
