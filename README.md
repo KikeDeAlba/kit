@@ -114,7 +114,7 @@ los servidores MCP de **Claude Desktop**.
 | Skill | `~/.claude/skills/<n>` | `~/.config/opencode/skills/<n>` | `~/.agents/skills/<n>` | extensión `skills/<n>` | plugin `skills/<n>` |
 | Comandos | `~/.claude/commands/*.md` | `~/.config/opencode/commands/*.md` | `~/.codex/prompts/*.md` | extensión `commands/*.toml` | no soportado (`skipped`) |
 | Hooks | `settings.json` | plugin | `~/.codex/hooks.json` | extensión `hooks/hooks.json` | no soportado |
-| MCP | `claude mcp add --scope user` | `opencode.json` | `config.toml` | `gemini-extension.json` | no soportado (`skipped`) |
+| MCP | `claude mcp add --scope user` | `opencode.json` | `config.toml` | `gemini-extension.json` | `~/.gemini/config/mcp_config.json` |
 | Subagentes | `~/.claude/agents/<n>.md` | `~/.config/opencode/agents/<n>.md` | `~/.codex/agents/<n>.toml` | extensión `agents/<n>.md` | plugin `agents/<n>.md` |
 | Memoria | `~/.claude/CLAUDE.md` | `~/.config/opencode/AGENTS.md` | `~/.codex/AGENTS.md` | `~/.gemini/GEMINI.md` | `~/.gemini/GEMINI.md` (mismo bloque que Gemini) |
 
@@ -139,6 +139,76 @@ Sin `agy` en el `PATH` el plugin se genera igual y el paso sale `unavailable` co
 el comando a correr. Antigravity se detecta por el binario `agy` o por
 `~/.gemini/config` (se cambia con `homes.antigravity`). Desinstalar corre
 `agy plugin uninstall <herramienta>`.
+
+Los plugins de `agy` no admiten hooks ni servidores MCP, así que los servidores MCP
+se escriben directo en `<homes.antigravity>/mcp_config.json`, sin pasar por
+`agy mcp`. Cada servidor queda bajo `mcpServers.<nombre>` como
+`{ command, args, env, disabled: false }` o, si es remoto,
+`{ serverUrl, headers, disabled: false }`. Solo se tocan las entradas de la
+integración: las demás claves del archivo se conservan, la escritura es atómica y
+se deja `mcp_config.json.backup`. Un archivo vacío cuenta como `{}`; uno con JSON
+inválido no se toca y el paso sale `failed`. `uninstallIntegration` quita solo
+esas entradas.
+
+#### Binarios de los agentes
+
+`detectAgents` y la instalación buscan cada binario con `findAgentBinary`
+(`findAgentBinarySync` en la versión síncrona), que no se queda en el `PATH`.
+Esto importa cuando la herramienta corre desde un hook o una app de escritorio y
+no hereda el `PATH` de la terminal. El orden de búsqueda es este:
+
+1. `override`, si se pasa y es ejecutable.
+2. El `PATH` y luego `defaultSearchDirs`.
+3. Los gestores de Node, con `toolchainSearchDirs`: `NVM_BIN`,
+   `~/.nvm/versions/node/*/bin` de la versión más nueva a la más vieja, el alias
+   `default` de fnm, Volta, `NPM_CONFIG_PREFIX`, `~/.npm-global/bin`, pnpm, Bun y
+   `~/.local/bin`. En Windows también `%APPDATA%\npm` y `%LOCALAPPDATA%\Volta\bin`.
+4. Las carpetas propias de cada agente, con `agentSearchDirs`:
+   `~/.gemini/antigravity-cli/bin` (agy), `~/.opencode/bin` y `~/.claude/local`.
+
+#### Agentes sin interfaz (headless)
+
+`runHeadless` corre un prompt en cualquiera de los agentes de `HEADLESS_AGENTS`
+y devuelve el texto de la respuesta, más el id de sesión si lo hay:
+
+```ts
+import { agents } from '@kikedealba/kit'
+
+const picked = await agents.pickHeadlessAgent(config.agent ?? 'claude')
+if (!picked) throw new Error('no hay ningún agente instalado')
+if (picked.fallback) console.warn(`usando ${picked.agent}`)
+const { text, sessionId } = await agents.runHeadless({ agent: picked.agent, bin: picked.bin, prompt, cwd, access: 'read' })
+```
+
+| Agente | Invocación | Prompt | Respuesta |
+|---|---|---|---|
+| claude | `claude -p --output-format json [--model m]` | stdin | `result`, `session_id` |
+| codex | `codex exec --json -C <cwd> --skip-git-repo-check --sandbox read-only\|workspace-write [-m m] -` | stdin | último `item.completed` con `agent_message`; id en `thread.started` |
+| gemini | `gemini -o json --approval-mode plan\|yolo [-m m]` con `GEMINI_CLI_TRUST_WORKSPACE=true` | stdin | `response`, `session_id` |
+| antigravity | `agy -p <prompt> --output-format json [--model m]`, más `--dangerously-skip-permissions` solo con `access: 'write'` | argumento | `response`, `conversation_id` |
+| opencode | `opencode run --format json [-m proveedor/modelo] <prompt>` | argumento | `part.text` de los eventos `text`, unidos; `sessionID` |
+
+`access` vale `read` por omisión. El proceso hijo recibe `KIT_HEADLESS=1`, que
+los hooks de bita y gaze respetan para no registrar esa sesión, y lleva la
+carpeta del binario al principio del `PATH`. El tiempo límite por omisión es de
+10 minutos; al vencer, o al abortar con `signal`, se mata el árbol de procesos
+(`taskkill /T /F` en Windows).
+
+Los fallos lanzan `HeadlessError` con un `code`, además de `exitCode`, `stdout`
+y `stderr`:
+
+| `code` | Cuándo |
+|---|---|
+| `UNAVAILABLE` | No se encontró el binario o no se pudo lanzar. |
+| `FAILED` | Salió con código distinto de cero, el agente reportó un error en su JSON o se abortó. |
+| `TIMEOUT` | Se venció `timeoutMs`. |
+| `PARSE` | Salió bien pero su salida no trae la respuesta. |
+| `PROMPT_TOO_LONG` | En Windows, un prompt de más de 8000 caracteres que va como argumento a un `.cmd`. |
+
+`parseHeadlessOutput(agent, stdout)` y `headlessInvocation(agent, opciones)`
+están expuestos para probar sin lanzar procesos. `pickHeadlessAgent(preferido)`
+devuelve el preferido si está instalado. Si no, devuelve el primero disponible
+de `order` (claude va primero) con `fallback: true` para que quien llama avise.
 
 #### Subagentes
 
@@ -281,6 +351,21 @@ hooks cambiaron, los viejos no se reconocen.
 Una herramienta que ya trae plugin debe llamar a `installIntegration` sin
 `claude` en `agents`. Si no, vuelve a escribir en `~/.claude` lo que el plugin ya
 trae y Claude Code lo carga dos veces.
+
+#### Procesos, notificaciones y Windows
+
+`spawnSpec(comando, args, ctx)` devuelve `{ command, args, windowsVerbatimArguments }`
+listo para `spawn`. En Windows un `.cmd` o `.bat` se envuelve en
+`cmd.exe /d /s /c` con cada argumento entre comillas y los metacaracteres
+escapados, así un argumento con `&`, `|` o comillas no se interpreta como
+comando. En los demás casos devuelve el comando tal cual. `run` lo usa en vez de
+`shell: true`. `whichSync` es la versión síncrona de `which`, y las dos aceptan
+un cuarto argumento con carpetas que se buscan después de `defaultSearchDirs`.
+
+`notify(título, cuerpo)` muestra una notificación del sistema y devuelve `true` o
+`false`, nunca lanza. En macOS usa `osascript` con el texto por `argv`, en Linux
+`notify-send` y en Windows un toast de PowerShell con `-EncodedCommand`.
+`notifyCommand` da el comando sin ejecutarlo.
 
 ### 5. Credenciales
 
