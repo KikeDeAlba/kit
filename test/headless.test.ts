@@ -59,7 +59,7 @@ test('each harness gets its own flags, sandbox and prompt channel', () => {
   const base = { prompt: '- hello', cwd: '/work' }
   const claudeRead = headlessInvocation('claude', { ...base, model: 'sonnet', extraArgs: ['--verbose'] })
   assert.deepEqual(claudeRead, {
-    args: ['-p', '--output-format', 'json', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'sonnet', '--verbose'],
+    args: ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'sonnet', '--verbose'],
     stdin: '- hello',
     env: {},
   })
@@ -128,7 +128,7 @@ test('runHeadless spawns the harness with the prompt on stdin and KIT_HEADLESS s
   const result = await runHeadless({ agent: 'claude', prompt: 'summarize this', cwd: home, bin: claude, model: 'haiku', ctx: sandbox(home), onSpawn: (pid) => pids.push(pid) })
   const seen = JSON.parse(result.text) as { input: string; args: string[]; headless: string; path: string; cwd: string }
   assert.equal(seen.input, 'summarize this')
-  assert.deepEqual(seen.args, ['-p', '--output-format', 'json', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'haiku'])
+  assert.deepEqual(seen.args, ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', 'Read,Grep,Glob', '--permission-mode', 'plan', '--setting-sources', 'user', '--model', 'haiku'])
   assert.equal(seen.headless, '1')
   assert.equal(seen.path, bin)
   assert.equal(await realpath(seen.cwd), await realpath(home))
@@ -456,4 +456,14 @@ test('runHeadless stops a harness that prints more than maxOutputBytes', { skip:
   const small = await fakeHarness(home, 'small.cjs', `console.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: 'ok' }))`)
   assert.equal((await runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: small, ctx, maxOutputBytes: 200 })).text, 'ok')
   await assert.rejects(runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: small, ctx, maxOutputBytes: 10 }), failure('FAILED', /more than 10 bytes/))
+})
+
+test('runHeadless keeps only the tail of stderr past maxOutputBytes and still succeeds', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await tempDir(t)
+  const noisy = await fakeHarness(home, 'noisy.cjs', `for (let i = 0; i < 400; i++) process.stderr.write('ñ'.repeat(1000) + '\\n')\nprocess.stderr.write('LAST LINE\\n')\nconsole.log(JSON.stringify({ type: 'result', is_error: false, session_id: 's', result: 'ok' }))`)
+  const result = await runHeadless({ agent: 'claude', prompt: 'x', cwd: home, bin: noisy, ctx: sandbox(home), maxOutputBytes: 4096 })
+  assert.equal(result.text, 'ok')
+  assert.ok(Buffer.byteLength(result.stderr) <= 4096)
+  assert.ok(result.stderr.endsWith('LAST LINE\n'))
+  assert.ok(!result.stderr.includes('\uFFFD'))
 })

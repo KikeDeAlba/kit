@@ -156,7 +156,7 @@ export function headlessEnvironment(agent: HeadlessAgent, base: NodeJS.ProcessEn
 }
 
 function claudeTools(tools: readonly string[] | undefined, write: boolean): string[] {
-  if (tools === undefined) return write ? [] : ['--tools', CLAUDE_READ_TOOLS.join(',')]
+  if (tools === undefined) return write ? [] : ['--strict-mcp-config', '--tools', CLAUDE_READ_TOOLS.join(',')]
   const names = tools.map((tool) => tool.trim()).filter((tool) => tool.length > 0)
   if (names.length === 0) return ['--strict-mcp-config', '--tools', CLAUDE_READ_TOOLS.join(','), '--disallowedTools', CLAUDE_READ_TOOLS.join(',')]
   return ['--strict-mcp-config', '--tools', names.join(',')]
@@ -431,6 +431,14 @@ function killTree(child: ChildProcess, ctx: PlatformContext): void {
   }, 3000).unref()
 }
 
+function tailBytes(value: string, limit: number): string {
+  const bytes = Buffer.from(value)
+  if (bytes.length <= limit) return value
+  let start = bytes.length - limit
+  while (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start++
+  return bytes.subarray(start).toString('utf8')
+}
+
 function stderrSummary(stderr: string): string {
   const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
   return lines.find((line) => line.includes('Error')) ?? lines.at(-1) ?? ''
@@ -512,7 +520,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessRes
       }
       stdout += chunk
     })
-    child.stderr?.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk))
+    child.stderr?.setEncoding('utf8').on('data', (chunk: string) => {
+      stderr += chunk
+      if (Buffer.byteLength(stderr) > maxOutputBytes) stderr = tailBytes(stderr, maxOutputBytes)
+    })
     child.once('error', (error: NodeJS.ErrnoException) => {
       const code = error.code === 'E2BIG' ? 'PROMPT_TOO_LONG' : 'UNAVAILABLE'
       finish(() => reject(new HeadlessError(code, agent, `could not start ${bin}: ${error.message}`, { stdout, stderr })))

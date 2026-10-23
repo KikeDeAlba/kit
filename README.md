@@ -195,7 +195,7 @@ recorta por su cuenta los mensajes de más de unos 190 KB (avisa con
 
 | Agente | Invocación | `access: 'read'` (por omisión) | `access: 'write'` | Respuesta |
 |---|---|---|---|---|
-| claude | `claude -p --output-format json [--model m]` | `--tools Read,Grep,Glob --permission-mode plan --setting-sources user` | `--permission-mode acceptEdits` | `result`, `session_id` |
+| claude | `claude -p --output-format json [--model m]` | `--strict-mcp-config --tools Read,Grep,Glob --permission-mode plan --setting-sources user` | `--permission-mode acceptEdits` | `result`, `session_id` |
 | codex | `codex exec --json -C <cwd> --skip-git-repo-check [-m m] -` | `--sandbox read-only` | `--sandbox workspace-write` | último `item.completed` con `agent_message`; id en `thread.started` |
 | gemini | `gemini -o json [-m m]` | `--approval-mode plan`, sin `GEMINI_CLI_TRUST_WORKSPACE` | `--approval-mode auto_edit` y `GEMINI_CLI_TRUST_WORKSPACE=true` | `response`, `session_id` |
 | antigravity | `agy --input-format stream-json --output-format stream-json [--model m] … -p=` | `--mode plan` | `--dangerously-skip-permissions` | `result.response`, `result.conversation_id` del evento `result` |
@@ -212,11 +212,15 @@ kit no manda el suyo). Va como `--strict-mcp-config --tools <a,b>`, de modo que
 tampoco se cargan los servidores MCP del usuario. Con `tools: []` no queda
 ninguna: kit manda `--strict-mcp-config --tools Read,Grep,Glob --disallowedTools
 Read,Grep,Glob`, que el evento `init` de claude reporta como `tools: []`. Los
-demás agentes ignoran `tools`. Sin `tools`, la lectura conserva `Read,Grep,Glob`
-y también los servidores MCP del usuario.
+demás agentes ignoran `tools`. Sin `tools`, la lectura deja solo `Read,Grep,Glob`
+y nunca carga los servidores MCP del usuario (`--strict-mcp-config`), porque esos
+servidores pueden escribir. La escritura sin `tools` usa las herramientas y los
+MCP que tenga el usuario.
 
 `maxOutputBytes` (8 MiB por omisión, `HEADLESS_DEFAULT_MAX_OUTPUT_BYTES`) limita
 el stdout del hijo: si lo pasa, kit mata el árbol de procesos y lanza `FAILED`.
+También acota stderr, pero ahí no falla: guarda solo los últimos `maxOutputBytes`
+bytes.
 
 El hijo no hereda todo el entorno. `headlessEnv(agent, env)` filtra con una lista
 blanca común, y bita, recap e inkwell pueden usarla para lo mismo:
