@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { copyFile, cp, lstat, mkdir, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { HookGroup, HookMap } from './types.ts'
 
@@ -148,4 +148,41 @@ export function removeTomlTable(text: string, header: string): { text: string; r
     if (!skipping) kept.push(line)
   }
   return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n'), removed }
+}
+
+async function treeEntries(root: string): Promise<Map<string, Buffer | null>> {
+  const entries = new Map<string, Buffer | null>()
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      const relative = path.relative(root, full)
+      if (entry.isDirectory()) {
+        entries.set(relative, null)
+        await walk(full)
+      } else {
+        entries.set(relative, await readFile(full))
+      }
+    }
+  }
+  await walk(root)
+  return entries
+}
+
+export async function sameTree(left: string, right: string): Promise<boolean> {
+  try {
+    const [a, b] = await Promise.all([treeEntries(left), treeEntries(right)])
+    if (a.size !== b.size) return false
+    for (const [name, content] of a) {
+      if (!b.has(name)) return false
+      const other = b.get(name) ?? null
+      if (content === null || other === null) {
+        if (content !== other) return false
+      } else if (!content.equals(other)) {
+        return false
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
 }
