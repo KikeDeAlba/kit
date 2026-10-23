@@ -537,3 +537,25 @@ test('antigravity MCP never overwrites a foreign entry with the same name and ke
   assert.equal(updated.find((entry) => entry.item === 'mcp demo')?.state, 'installed')
   assert.equal((await stat(file)).mode & 0o777, 0o640)
 })
+
+test('antigravity MCP adopts an unmarked entry identical to what kit would write', async (t) => {
+  const home = await tempDir(t)
+  const ctx = sandbox(home, { PATH: '' })
+  const { integration, homes } = await fixture(home)
+  const file = path.join(homes.antigravity, 'mcp_config.json')
+  await mkdir(homes.antigravity, { recursive: true })
+  await writeFile(file, JSON.stringify({ mcpServers: { demo: { command: 'demo', args: ['mcp'], env: {}, disabled: false } } }))
+  const agy = fakeAgy(homes)
+  const steps = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(steps.find((step) => step.item === 'mcp demo')?.state, 'installed')
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).mcpServers.demo, { command: 'demo', args: ['mcp'], disabled: false, _kit: 'demo' })
+
+  await writeFile(file, JSON.stringify({ mcpServers: { demo: { command: 'demo', args: ['mcp'], disabled: false } } }))
+  const removed = await uninstallIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(removed.find((step) => step.item === 'mcp demo')?.state, 'removed')
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { mcpServers: {} })
+
+  await writeFile(file, JSON.stringify({ mcpServers: { demo: { command: 'demo', args: ['mcp'], disabled: true } } }))
+  const differs = await installIntegration(integration, { agents: ['antigravity'], ctx, homes, exec: agy.exec, locate: agy.locate })
+  assert.equal(differs.find((step) => step.item === 'mcp demo')?.state, 'skipped')
+})
