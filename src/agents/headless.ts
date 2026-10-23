@@ -88,6 +88,13 @@ export const HEADLESS_ENV_ALLOWLIST: readonly string[] = [
   'WINDIR',
   'COMSPEC',
   'PATHEXT',
+  'PROGRAMFILES',
+  'PROGRAMFILES(X86)',
+  'PROGRAMW6432',
+  'COMMONPROGRAMFILES',
+  'ALLUSERSPROFILE',
+  'PROCESSOR_ARCHITECTURE',
+  'NUMBER_OF_PROCESSORS',
   'HTTP_PROXY',
   'HTTPS_PROXY',
   'NO_PROXY',
@@ -283,12 +290,13 @@ function parseOpenCode(stdout: string): { text: string; sessionId?: string } {
 }
 
 function antigravityFailure(payload: Record<string, unknown>): string | undefined {
+  const response = text(payload['response']) ?? ''
+  if (response.trim().length > 0 && payload['status'] !== 'ERROR') return undefined
   const error = payload['error']
   if ((typeof error === 'string' && error.length > 0) || asRecord(error)) return errorMessage(error)
   if (payload['status'] === 'ERROR') return 'status ERROR'
   const denied = Array.isArray(payload['denied_actions']) ? payload['denied_actions'] : []
-  const response = text(payload['response']) ?? ''
-  if (response.trim().length === 0 && denied.length > 0) {
+  if (denied.length > 0) {
     const names = denied.map((entry) => text(asRecord(entry)?.['action']) ?? JSON.stringify(entry)).join(', ')
     return `permission denied for ${names}`
   }
@@ -308,7 +316,10 @@ export function parseHeadlessOutput(agent: HeadlessAgent, stdout: string): { tex
 
 function childEnv(agent: HeadlessAgent, bin: string, invocation: HeadlessInvocation, options: HeadlessOptions, ctx: PlatformContext): NodeJS.ProcessEnv {
   const inherited = headlessEnv(agent, { ...ctx.env, ...(options.env ?? {}) })
-  for (const key of invocation.unset ?? []) delete inherited[key]
+  const unset = new Set((invocation.unset ?? []).map((key) => key.toUpperCase()))
+  for (const key of Object.keys(inherited)) {
+    if (unset.has(ctx.platform === 'win32' ? key.toUpperCase() : key)) delete inherited[key]
+  }
   const env: NodeJS.ProcessEnv = { ...inherited, ...invocation.env, ...(options.env ?? {}), KIT_HEADLESS: '1' }
   const key = pathKey(env)
   for (const other of Object.keys(env)) if (other !== key && other.toUpperCase() === 'PATH') delete env[other]
@@ -331,14 +342,36 @@ function killLiveGroups(): void {
   }
 }
 
+const FORWARDED_SIGNALS: readonly NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP']
+
+const signalHandlers = new Map<NodeJS.Signals, () => void>(
+  FORWARDED_SIGNALS.map((signal) => [
+    signal,
+    () => {
+      killLiveGroups()
+      liveGroups.clear()
+      releaseHandlers()
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal)
+    },
+  ]),
+)
+
+function releaseHandlers(): void {
+  process.off('exit', killLiveGroups)
+  for (const [signal, handler] of signalHandlers) process.off(signal, handler)
+}
+
 function trackGroup(pid: number): void {
-  if (liveGroups.size === 0) process.on('exit', killLiveGroups)
+  if (liveGroups.size === 0) {
+    process.on('exit', killLiveGroups)
+    for (const [signal, handler] of signalHandlers) process.on(signal, handler)
+  }
   liveGroups.add(pid)
 }
 
 function untrackGroup(pid: number): void {
   if (!liveGroups.delete(pid)) return
-  if (liveGroups.size === 0) process.off('exit', killLiveGroups)
+  if (liveGroups.size === 0) releaseHandlers()
 }
 
 export function liveHeadlessGroups(): number[] {
