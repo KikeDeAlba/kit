@@ -1,5 +1,5 @@
 import { parseFrontmatter, renderForAgent } from './markdown.ts'
-import type { AgentName } from './types.ts'
+import type { AgentName, MemoryAgent } from './types.ts'
 
 export interface Subagent {
   name: string
@@ -88,11 +88,55 @@ export function subagentForGemini(markdown: string, fallbackName: string): strin
   return `${header.join('\n')}\n${agent.body}`
 }
 
-export const MEMORY_FILES: Record<Exclude<AgentName, 'claude-desktop'>, string> = {
+const ANTIGRAVITY_TOOLS: Record<string, string[]> = {
+  Read: ['view_file', 'list_dir'],
+  Grep: ['grep_search'],
+  Glob: ['find_by_name'],
+  LS: ['list_dir'],
+  Bash: ['run_command'],
+  Edit: ['replace_file_content'],
+  MultiEdit: ['multi_replace_file_content'],
+  Write: ['write_to_file'],
+  WebFetch: ['read_url_content'],
+  WebSearch: ['search_web'],
+}
+
+const ANTIGRAVITY_ORDER = [
+  'view_file',
+  'list_dir',
+  'grep_search',
+  'find_by_name',
+  'run_command',
+  'replace_file_content',
+  'multi_replace_file_content',
+  'write_to_file',
+  'read_url_content',
+  'search_web',
+]
+
+export function subagentForAntigravity(markdown: string, fallbackName: string): string {
+  const agent = parseSubagent(markdown, 'antigravity', fallbackName)
+  const header = ['---', `name: ${agent.name}`, `description: ${JSON.stringify(agent.description)}`]
+  if (agent.tools !== null && agent.tools.length > 0 && !agent.tools.includes('*')) {
+    const mapped = new Set(agent.tools.flatMap((tool) => ANTIGRAVITY_TOOLS[tool] ?? []))
+    const tools = ANTIGRAVITY_ORDER.filter((tool) => mapped.has(tool))
+    if (tools.length === 0) throw new Error(`subagent ${agent.name}: none of its tools (${agent.tools.join(', ')}) exist in antigravity`)
+    header.push(`tools: [${tools.join(', ')}]`)
+  }
+  header.push('model: inherit', '---')
+  return `${header.join('\n')}\n${agent.body}`
+}
+
+export const MEMORY_FILES: Record<MemoryAgent, string> = {
   claude: 'CLAUDE.md',
   opencode: 'AGENTS.md',
   codex: 'AGENTS.md',
   gemini: 'GEMINI.md',
+  antigravity: 'GEMINI.md',
+}
+
+export function renderMemory(text: string, agent: MemoryAgent): string {
+  return renderForAgent(text, agent === 'antigravity' ? 'gemini' : agent)
 }
 
 function markers(tool: string): { begin: string; end: string } {
