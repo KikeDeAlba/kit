@@ -185,22 +185,24 @@ if (picked.fallback) console.warn(`usando ${picked.agent}`)
 const { text, sessionId } = await agents.runHeadless({ agent: picked.agent, bin: picked.bin, prompt, cwd, access: 'read' })
 ```
 
-El prompt va por stdin en todos los agentes salvo `agy`, que no lee stdin y lo
-recibe por argv como `--print=<prompt>`. Así un prompt que empieza con `-` no se
-toma como flag, pero en agy el prompt queda visible en la lista de procesos
-(`ps`) y, si `agy` es un `.cmd` en Windows, aplican los límites de `cmd.exe`
-(ver la tabla de errores).
+El prompt va por stdin en todos los agentes, así que no cuenta para el límite de
+la línea de comandos, un prompt que empieza con `-` no se toma como flag y no
+queda visible en la lista de procesos (`ps`). A `agy` le llega como una línea
+NDJSON `{"event":"user","message":{"content":"<prompt>"}}` con `--input-format
+stream-json` y `-p=` vacío; la respuesta sale del evento `result`. Ojo: `agy`
+recorta por su cuenta los mensajes de más de unos 190 KB (avisa con
+`<truncated N bytes>`), venga el prompt por donde venga.
 
 | Agente | Invocación | `access: 'read'` (por omisión) | `access: 'write'` | Respuesta |
 |---|---|---|---|---|
 | claude | `claude -p --output-format json [--model m]` | `--tools Read,Grep,Glob --permission-mode plan --setting-sources user` | `--permission-mode acceptEdits` | `result`, `session_id` |
 | codex | `codex exec --json -C <cwd> --skip-git-repo-check [-m m] -` | `--sandbox read-only` | `--sandbox workspace-write` | último `item.completed` con `agent_message`; id en `thread.started` |
 | gemini | `gemini -o json [-m m]` | `--approval-mode plan`, sin `GEMINI_CLI_TRUST_WORKSPACE` | `--approval-mode auto_edit` y `GEMINI_CLI_TRUST_WORKSPACE=true` | `response`, `session_id` |
-| antigravity | `agy --print=<prompt> --output-format json [--model m]` | `--mode plan` | `--dangerously-skip-permissions` | `response`, `conversation_id` |
+| antigravity | `agy --input-format stream-json --output-format stream-json [--model m] … -p=` | `--mode plan` | `--dangerously-skip-permissions` | `result.response`, `result.conversation_id` del evento `result` |
 | opencode | `opencode run --format json [-m proveedor/modelo]` | `--agent plan` | agente por omisión | `part.text` de los eventos `text`, unidos; `sessionID` |
 
-`extraArgs` va después de los flags de acceso. En agy cuenta la respuesta: si
-`response` trae texto y `status` no es `ERROR`, la corrida es buena aunque traiga
+`extraArgs` va después de los flags de acceso (en agy, antes de `-p=`). En agy
+cuenta la respuesta: si `response` trae texto y `status` no es `ERROR`, la corrida es buena aunque traiga
 `error` o `denied_actions`. Sin texto útil, falla con `FAILED` y el mensaje sale
 de `error`, de `status` o de las acciones denegadas.
 
