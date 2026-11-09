@@ -1,9 +1,8 @@
 import { existsSync } from 'node:fs'
-import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, readFile, readlink, realpath, rename, rm, symlink, writeFile, chmod } from 'node:fs/promises'
 import path from 'node:path'
-import { linkPath } from './agents/files.ts'
 import { findAgentBinary } from './agents/binaries.ts'
-import { writeFileAtomic } from './atomic.ts'
+import { withFileLock, writeFileAtomic } from './atomic.ts'
 import { withoutHarnessSession } from './harness/env.ts'
 import type { HarnessId } from './harness/types.ts'
 import { kitConfigRoot, platformContext, run, type PlatformContext } from './platform.ts'
@@ -15,7 +14,8 @@ export type ProfileHarness = (typeof PROFILE_HARNESSES)[number]
 export const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
 export const PROFILES_SCHEMA_URL = 'https://raw.githubusercontent.com/KikeDeAlba/kit/main/schemas/profiles.v1.json'
 export const PROFILE_HOME_ENV: Record<ProfileHarness, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME' }
-export const PROFILE_SECRET_ENV: readonly string[] = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY']
+export const PROFILE_SECRET_ENV: readonly string[] = ['CLAUDE_CODE_OAUTH_TOKEN', 'CODEX_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']
+export const PROFILE_SECRET_ENV_PREFIXES: readonly string[] = ['ANTHROPIC_', 'OPENAI_', 'AWS_BEARER_', 'CLAUDE_CODE_USE_']
 
 export interface Profile {
   name: string
@@ -75,7 +75,7 @@ export function tildePath(value: string, ctx: PlatformContext = platformContext(
   const resolved = p.resolve(value)
   if (resolved === home) return '~'
   const relative = p.relative(home, resolved)
-  if (relative.length === 0 || relative.startsWith('..') || p.isAbsolute(relative)) return value
+  if (relative.length === 0 || relative === '..' || relative.startsWith(`..${p.sep}`) || p.isAbsolute(relative)) return value
   return `~/${relative.split(p.sep).join('/')}`
 }
 
@@ -86,8 +86,18 @@ export function expandPath(value: string, ctx: PlatformContext = platformContext
   return value
 }
 
+function emptyRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>
+}
+
 function emptyFile(): ProfilesFile {
-  return { version: 1, default: 'default', profiles: { default: { builtin: true, claude: null, codex: null, createdAt: null } }, dirs: [] }
+  const profiles = emptyRecord<Omit<Profile, 'name'>>()
+  profiles['default'] = { builtin: true, claude: null, codex: null, createdAt: null }
+  return { version: 1, default: 'default', profiles, dirs: [] }
+}
+
+function hasProfile(data: { profiles: Record<string, unknown> }, name: string): boolean {
+  return Object.hasOwn(data.profiles, name)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -102,7 +112,7 @@ export function parseProfiles(raw: unknown, ctx: PlatformContext = platformConte
   if (!isRecord(raw)) throw invalid(file, 'not a JSON object')
   if (raw['version'] !== PROFILES_VERSION) throw invalid(file, `version must be ${PROFILES_VERSION}`)
   if (!isRecord(raw['profiles'])) throw invalid(file, 'profiles must be an object')
-  const profiles: Record<string, Omit<Profile, 'name'>> = {}
+  const profiles = emptyRecord<Omit<Profile, 'name'>>()
   let builtins = 0
   for (const [name, entry] of Object.entries(raw['profiles'])) {
     if (!PROFILE_NAME_PATTERN.test(name)) throw invalid(file, `profile name "${name}" does not match ${PROFILE_NAME_PATTERN.source}`)
@@ -120,17 +130,20 @@ export function parseProfiles(raw: unknown, ctx: PlatformContext = platformConte
     const codex = entry['codex']
     if (typeof claude !== 'string' || claude.length === 0) throw invalid(file, `profile "${name}" needs a claude directory`)
     if (typeof codex !== 'string' || codex.length === 0) throw invalid(file, `profile "${name}" needs a codex directory`)
-    profiles[name] = { builtin: false, claude: expandPath(claude, ctx), codex: expandPath(codex, ctx), createdAt }
+    const claudeHome = expandPath(claude, ctx)
+    const codexHome = expandPath(codex, ctx)
+    if (!pathApi(ctx).isAbsolute(claudeHome) || !pathApi(ctx).isAbsolute(codexHome)) throw invalid(file, `profile "${name}" directories must be absolute`)
+    profiles[name] = { builtin: false, claude: claudeHome, codex: codexHome, createdAt }
   }
   if (builtins !== 1) throw invalid(file, `exactly one profile must be builtin, found ${builtins}`)
   const fallback = raw['default']
-  if (typeof fallback !== 'string' || !(fallback in profiles)) throw invalid(file, 'default must name an existing profile')
+  if (typeof fallback !== 'string' || !Object.hasOwn(profiles, fallback)) throw invalid(file, 'default must name an existing profile')
   const dirs: DirMapping[] = []
   const rawDirs = raw['dirs'] ?? []
   if (!Array.isArray(rawDirs)) throw invalid(file, 'dirs must be an array')
   for (const mapping of rawDirs) {
     if (!isRecord(mapping) || typeof mapping['path'] !== 'string' || typeof mapping['profile'] !== 'string') throw invalid(file, 'each dirs entry needs path and profile')
-    if (!(mapping['profile'] in profiles)) throw invalid(file, `dirs entry ${mapping['path']} points to unknown profile "${mapping['profile']}"`)
+    if (!Object.hasOwn(profiles, mapping['profile'])) throw invalid(file, `dirs entry ${mapping['path']} points to unknown profile "${mapping['profile']}"`)
     const expanded = expandPath(mapping['path'], ctx)
     if (!pathApi(ctx).isAbsolute(expanded)) throw invalid(file, `dirs entry ${mapping['path']} is not absolute`)
     dirs.push({ path: expanded, profile: mapping['profile'] })
@@ -181,12 +194,21 @@ async function writeProfiles(data: ProfilesFile, ctx: PlatformContext): Promise<
   await writeFileAtomic(profilesPath(ctx), `${JSON.stringify(serializeProfiles(data, ctx), null, 2)}\n`, { mode: 0o600 })
 }
 
+async function mutateProfiles<T>(ctx: PlatformContext, change: (data: ProfilesFile) => Promise<{ result: T; write: boolean }>): Promise<T> {
+  return withFileLock(profilesPath(ctx), async () => {
+    const data = await readProfiles(ctx)
+    const { result, write } = await change(data)
+    if (write) await writeProfiles(data, ctx)
+    return result
+  })
+}
+
 function toProfile(name: string, entry: Omit<Profile, 'name'>): Profile {
   return { name, builtin: entry.builtin, claude: entry.claude, codex: entry.codex, createdAt: entry.createdAt }
 }
 
 function requireProfile(data: ProfilesFile, name: string): Profile {
-  const entry = data.profiles[name]
+  const entry = hasProfile(data, name) ? data.profiles[name] : undefined
   if (!entry) throw new ProfileError('PROFILE_NOT_FOUND', `profile "${name}" does not exist`)
   return toProfile(name, entry)
 }
@@ -205,16 +227,25 @@ export async function getProfile(name: string, ctx: PlatformContext = platformCo
 }
 
 async function realOrResolved(dir: string): Promise<string> {
-  try {
-    return await realpath(dir)
-  } catch {
-    return path.resolve(dir)
+  const resolved = path.resolve(dir)
+  const missing: string[] = []
+  let current = resolved
+  for (;;) {
+    try {
+      const real = await realpath(current)
+      return missing.length === 0 ? real : path.join(real, ...missing.reverse())
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) return resolved
+      missing.push(path.basename(current))
+      current = parent
+    }
   }
 }
 
 function isWithin(child: string, parent: string): boolean {
   const relative = path.relative(parent, child)
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
 }
 
 function depth(dir: string): number {
@@ -258,11 +289,17 @@ function deleteKey(env: NodeJS.ProcessEnv, name: string): void {
   for (const key of Object.keys(env)) if (key.toUpperCase() === name) delete env[key]
 }
 
+function isProfileSecret(key: string): boolean {
+  const upper = key.toUpperCase()
+  return PROFILE_SECRET_ENV.includes(upper) || PROFILE_SECRET_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix))
+}
+
 export function envFor(profile: Profile, harness: HarnessId | 'all', baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = withoutHarnessSession(baseEnv)
   for (const name of Object.values(PROFILE_HOME_ENV)) deleteKey(env, name)
-  if (!profile.builtin && (harness === 'all' || profileSupports(harness))) {
-    for (const name of PROFILE_SECRET_ENV) deleteKey(env, name)
+  deleteKey(env, PROFILE_ENV)
+  if (!profile.builtin) {
+    for (const key of Object.keys(env)) if (isProfileSecret(key)) delete env[key]
     if ((harness === 'claude' || harness === 'all') && profile.claude) env[PROFILE_HOME_ENV.claude] = profile.claude
     if ((harness === 'codex' || harness === 'all') && profile.codex) env[PROFILE_HOME_ENV.codex] = profile.codex
   }
@@ -291,36 +328,35 @@ async function ensureProfileDirs(profile: Profile, ctx: PlatformContext): Promis
 
 export async function addProfile(name: string, ctx: PlatformContext = platformContext()): Promise<{ profile: Profile; created: boolean }> {
   checkName(name)
-  const data = await readProfiles(ctx)
-  const existing = data.profiles[name]
-  if (existing) {
-    const profile = toProfile(name, existing)
+  return mutateProfiles<{ profile: Profile; created: boolean }>(ctx, async (data) => {
+    if (hasProfile(data, name)) {
+      const profile = toProfile(name, data.profiles[name] as Omit<Profile, 'name'>)
+      await ensureProfileDirs(profile, ctx)
+      return { result: { profile, created: false }, write: false }
+    }
+    const homes = profileHomes(name, ctx)
+    const profile: Profile = { name, builtin: false, claude: homes.claude, codex: homes.codex, createdAt: new Date().toISOString() }
     await ensureProfileDirs(profile, ctx)
-    return { profile, created: false }
-  }
-  const homes = profileHomes(name, ctx)
-  const profile: Profile = { name, builtin: false, claude: homes.claude, codex: homes.codex, createdAt: new Date().toISOString() }
-  await ensureProfileDirs(profile, ctx)
-  data.profiles[name] = { builtin: false, claude: profile.claude, codex: profile.codex, createdAt: profile.createdAt }
-  await writeProfiles(data, ctx)
-  return { profile, created: true }
+    data.profiles[name] = { builtin: false, claude: profile.claude, codex: profile.codex, createdAt: profile.createdAt }
+    return { result: { profile, created: true }, write: true }
+  })
 }
 
 export async function renameBuiltinProfile(name: string, ctx: PlatformContext = platformContext()): Promise<Profile> {
   checkName(name)
-  const data = await readProfiles(ctx)
-  const current = Object.entries(data.profiles).find(([, entry]) => entry.builtin)
-  if (!current) throw invalid(profilesPath(ctx), 'no builtin profile')
-  const [previous, entry] = current
-  if (previous === name) return toProfile(name, entry)
-  if (data.profiles[name]) throw new ProfileError('PROFILE_INVALID_NAME', `profile "${name}" already exists`)
-  const profiles: Record<string, Omit<Profile, 'name'>> = {}
-  for (const [key, value] of Object.entries(data.profiles)) profiles[key === previous ? name : key] = value
-  data.profiles = profiles
-  if (data.default === previous) data.default = name
-  data.dirs = data.dirs.map((mapping) => (mapping.profile === previous ? { ...mapping, profile: name } : mapping))
-  await writeProfiles(data, ctx)
-  return toProfile(name, entry)
+  return mutateProfiles(ctx, async (data) => {
+    const current = Object.entries(data.profiles).find(([, entry]) => entry.builtin)
+    if (!current) throw invalid(profilesPath(ctx), 'no builtin profile')
+    const [previous, entry] = current
+    if (previous === name) return { result: toProfile(name, entry), write: false }
+    if (hasProfile(data, name)) throw new ProfileError('PROFILE_INVALID_NAME', `profile "${name}" already exists`)
+    const profiles = emptyRecord<Omit<Profile, 'name'>>()
+    for (const [key, value] of Object.entries(data.profiles)) profiles[key === previous ? name : key] = value
+    data.profiles = profiles
+    if (data.default === previous) data.default = name
+    data.dirs = data.dirs.map((mapping) => (mapping.profile === previous ? { ...mapping, profile: name } : mapping))
+    return { result: toProfile(name, entry), write: true }
+  })
 }
 
 export async function removeProfile(
@@ -328,14 +364,15 @@ export async function removeProfile(
   options: { purge?: boolean } = {},
   ctx: PlatformContext = platformContext(),
 ): Promise<{ removed: boolean; purged: boolean; unmapped: string[] }> {
-  const data = await readProfiles(ctx)
-  const profile = requireProfile(data, name)
-  if (profile.builtin) throw new ProfileError('PROFILE_BUILTIN', `profile "${name}" is the builtin profile and cannot be removed`)
-  if (data.default === name) throw new ProfileError('PROFILE_IS_DEFAULT', `profile "${name}" is the default; choose another default first`)
-  const unmapped = data.dirs.filter((mapping) => mapping.profile === name).map((mapping) => mapping.path)
-  data.dirs = data.dirs.filter((mapping) => mapping.profile !== name)
-  delete data.profiles[name]
-  await writeProfiles(data, ctx)
+  const unmapped = await mutateProfiles(ctx, async (data) => {
+    const profile = requireProfile(data, name)
+    if (profile.builtin) throw new ProfileError('PROFILE_BUILTIN', `profile "${name}" is the builtin profile and cannot be removed`)
+    if (data.default === name) throw new ProfileError('PROFILE_IS_DEFAULT', `profile "${name}" is the default; choose another default first`)
+    const dropped = data.dirs.filter((mapping) => mapping.profile === name).map((mapping) => mapping.path)
+    data.dirs = data.dirs.filter((mapping) => mapping.profile !== name)
+    delete data.profiles[name]
+    return { result: dropped, write: true }
+  })
   let purged = false
   if (options.purge) {
     await rm(profileHomes(name, ctx).root, { recursive: true, force: true })
@@ -345,38 +382,39 @@ export async function removeProfile(
 }
 
 export async function setDefaultProfile(name: string, ctx: PlatformContext = platformContext()): Promise<void> {
-  const data = await readProfiles(ctx)
-  requireProfile(data, name)
-  if (data.default === name) return
-  data.default = name
-  await writeProfiles(data, ctx)
+  await mutateProfiles(ctx, async (data) => {
+    requireProfile(data, name)
+    if (data.default === name) return { result: undefined, write: false }
+    data.default = name
+    return { result: undefined, write: true }
+  })
 }
 
 export async function mapDir(dir: string, name: string, ctx: PlatformContext = platformContext()): Promise<DirMapping> {
-  const data = await readProfiles(ctx)
-  requireProfile(data, name)
   const resolved = await realOrResolved(dir)
-  const mapping: DirMapping = { path: resolved, profile: name }
-  const others: DirMapping[] = []
-  for (const existing of data.dirs) {
-    if ((await realOrResolved(existing.path)) !== resolved) others.push(existing)
-  }
-  data.dirs = [...others, mapping]
-  await writeProfiles(data, ctx)
-  return mapping
+  return mutateProfiles(ctx, async (data) => {
+    requireProfile(data, name)
+    const mapping: DirMapping = { path: resolved, profile: name }
+    const others: DirMapping[] = []
+    for (const existing of data.dirs) {
+      if ((await realOrResolved(existing.path)) !== resolved) others.push(existing)
+    }
+    data.dirs = [...others, mapping]
+    return { result: mapping, write: true }
+  })
 }
 
 export async function unmapDir(dir: string, ctx: PlatformContext = platformContext()): Promise<boolean> {
-  const data = await readProfiles(ctx)
   const resolved = await realOrResolved(dir)
-  const kept: DirMapping[] = []
-  for (const existing of data.dirs) {
-    if ((await realOrResolved(existing.path)) !== resolved) kept.push(existing)
-  }
-  if (kept.length === data.dirs.length) return false
-  data.dirs = kept
-  await writeProfiles(data, ctx)
-  return true
+  return mutateProfiles(ctx, async (data) => {
+    const kept: DirMapping[] = []
+    for (const existing of data.dirs) {
+      if ((await realOrResolved(existing.path)) !== resolved) kept.push(existing)
+    }
+    if (kept.length === data.dirs.length) return { result: false, write: false }
+    data.dirs = kept
+    return { result: true, write: true }
+  })
 }
 
 export interface SharedLinkSpec {
@@ -395,7 +433,9 @@ export const SHARED_LINKS: readonly SharedLinkSpec[] = [
   { harness: 'codex', name: 'config.toml', kind: 'file' },
 ]
 
-export type SharedLinkState = 'linked' | 'missing' | 'replaced' | 'foreign'
+export type SharedLinkState = 'linked' | 'copied' | 'missing' | 'replaced' | 'foreign'
+
+export const HEALTHY_LINK_STATES: readonly SharedLinkState[] = ['linked', 'copied']
 
 export interface SharedLink extends SharedLinkSpec {
   path: string
@@ -405,7 +445,6 @@ export interface SharedLink extends SharedLinkSpec {
 
 export interface SharedLinkRepair extends SharedLink {
   previous: SharedLinkState
-  merged: string[]
   backup: string | null
 }
 
@@ -414,10 +453,13 @@ export function sharedHomes(ctx: PlatformContext = platformContext()): Record<Pr
   return { claude: p.join(ctx.home, '.claude'), codex: p.join(ctx.home, '.codex') }
 }
 
-async function linkState(linkName: string, target: string): Promise<SharedLinkState> {
+async function linkState(spec: SharedLinkSpec, linkName: string, target: string, ctx: PlatformContext): Promise<SharedLinkState> {
   const info = await lstat(linkName).catch(() => null)
   if (!info) return 'missing'
-  if (!info.isSymbolicLink()) return 'replaced'
+  if (!info.isSymbolicLink()) {
+    if (ctx.platform === 'win32' && spec.kind === 'file' && info.isFile()) return 'copied'
+    return 'replaced'
+  }
   const pointed = path.resolve(path.dirname(linkName), await readlink(linkName))
   if (pointed === path.resolve(target)) return 'linked'
   const [left, right] = await Promise.all([realOrResolved(pointed), realOrResolved(target)])
@@ -438,7 +480,7 @@ export async function inspectSharedLinks(name: string, ctx: PlatformContext = pl
   const profile = await getProfile(name, ctx)
   const links: SharedLink[] = []
   for (const { spec, path: linkName, target } of linkSpecs(profile, ctx)) {
-    links.push({ ...spec, path: linkName, target, state: await linkState(linkName, target) })
+    links.push({ ...spec, path: linkName, target, state: await linkState(spec, linkName, target, ctx) })
   }
   return links
 }
@@ -455,127 +497,31 @@ async function ensureSharedTarget(spec: SharedLinkSpec, target: string): Promise
   })
 }
 
-export function mergeMissingJson(shared: Record<string, unknown>, local: Record<string, unknown>, prefix = ''): string[] {
-  const added: string[] = []
-  for (const [key, value] of Object.entries(local)) {
-    const where = prefix ? `${prefix}.${key}` : key
-    if (!(key in shared)) {
-      shared[key] = value
-      added.push(where)
-      continue
-    }
-    const current = shared[key]
-    if (isRecord(current) && isRecord(value)) added.push(...mergeMissingJson(current, value, where))
-  }
-  return added
+function backupStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-')
 }
 
-interface TomlSection {
-  header: string
-  lines: string[]
-  entries: Map<string, string[]>
+async function moveAside(file: string): Promise<string> {
+  const base = `${file}.backup-${backupStamp()}`
+  let backup = base
+  for (let attempt = 1; existsSync(backup) || (await lstat(backup).catch(() => null)); attempt++) backup = `${base}-${attempt}`
+  try {
+    await rename(file, backup)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
+    await cp(file, backup, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true })
+    await rm(file, { recursive: true, force: true })
+  }
+  return backup
 }
 
-const TOML_HEADER = /^\s*(\[\[?[^\]]+\]\]?)\s*(?:#.*)?$/
-const TOML_KEY = /^\s*("[^"]*"|'[^']*'|[A-Za-z0-9_.-]+)\s*=/
-
-function parseTomlSections(text: string): TomlSection[] {
-  const sections: TomlSection[] = [{ header: '', lines: [], entries: new Map() }]
-  let entry: string[] | null = null
-  for (const line of text.split('\n')) {
-    const header = TOML_HEADER.exec(line)
-    if (header) {
-      sections.push({ header: (header[1] ?? '').replace(/\s+/g, ''), lines: [line], entries: new Map() })
-      entry = null
-      continue
-    }
-    const section = sections[sections.length - 1] as TomlSection
-    section.lines.push(line)
-    const key = TOML_KEY.exec(line)
-    if (key) {
-      entry = [line]
-      if (!section.entries.has(key[1] as string)) section.entries.set(key[1] as string, entry)
-    } else if (entry && line.trim().length > 0 && !line.trim().startsWith('#')) entry.push(line)
-    else entry = null
+async function placeLink(spec: SharedLinkSpec, target: string, linkName: string, ctx: PlatformContext): Promise<void> {
+  if (ctx.platform === 'win32') {
+    if (spec.kind === 'dir') await symlink(target, linkName, 'junction')
+    else await cp(target, linkName)
+    return
   }
-  return sections
-}
-
-function trimTrailingBlank(lines: string[]): { body: string[]; tail: string[] } {
-  let end = lines.length
-  while (end > 0 && (lines[end - 1] ?? '').trim().length === 0) end -= 1
-  return { body: lines.slice(0, end), tail: lines.slice(end) }
-}
-
-export function mergeMissingToml(sharedText: string, localText: string): { text: string; added: string[] } {
-  const shared = parseTomlSections(sharedText)
-  const local = parseTomlSections(localText)
-  const added: string[] = []
-  const appended: string[][] = []
-  for (const section of local) {
-    const match = shared.find((candidate) => candidate.header === section.header)
-    if (!match) {
-      appended.push(trimTrailingBlank(section.lines).body)
-      added.push(section.header)
-      continue
-    }
-    if (section.header.startsWith('[[')) continue
-    for (const [key, lines] of section.entries) {
-      if (match.entries.has(key)) continue
-      const { body, tail } = trimTrailingBlank(match.lines)
-      match.lines = [...body, ...lines, ...tail]
-      match.entries.set(key, lines)
-      added.push(section.header ? `${section.header.slice(1, -1)}.${key}` : key)
-    }
-  }
-  if (added.length === 0) return { text: sharedText, added }
-  const blocks = shared.map((section) => section.lines.join('\n'))
-  let text = blocks.filter((block, index) => index > 0 || block.length > 0).join('\n')
-  for (const block of appended) text = `${text.replace(/\n*$/, '')}${text.trim().length > 0 ? '\n\n' : ''}${block.join('\n')}\n`
-  if (!text.endsWith('\n')) text = `${text}\n`
-  return { text, added }
-}
-
-async function mergeIntoShared(spec: SharedLinkSpec, local: string, target: string): Promise<string[]> {
-  const info = await lstat(local)
-  if (spec.kind === 'dir') {
-    if (!info.isDirectory()) return []
-    const moved: string[] = []
-    for (const entry of await readdir(local)) {
-      const destination = path.join(target, entry)
-      if (existsSync(destination)) continue
-      await rename(path.join(local, entry), destination)
-      moved.push(entry)
-    }
-    return moved
-  }
-  if (!info.isFile()) return []
-  const localText = await readFile(local, 'utf8')
-  const sharedText = await readFile(target, 'utf8')
-  if (spec.name.endsWith('.json')) {
-    let localValue: unknown
-    let sharedValue: unknown
-    try {
-      localValue = JSON.parse(localText)
-      sharedValue = sharedText.trim().length === 0 ? {} : JSON.parse(sharedText)
-    } catch {
-      return []
-    }
-    if (!isRecord(localValue) || !isRecord(sharedValue)) return []
-    const added = mergeMissingJson(sharedValue, localValue)
-    if (added.length > 0) await writeFileAtomic(target, `${JSON.stringify(sharedValue, null, 2)}\n`)
-    return added
-  }
-  if (spec.name.endsWith('.toml')) {
-    const merged = mergeMissingToml(sharedText, localText)
-    if (merged.added.length > 0) await writeFileAtomic(target, merged.text)
-    return merged.added
-  }
-  if (sharedText.trim().length === 0 && localText.trim().length > 0) {
-    await writeFileAtomic(target, localText)
-    return ['content']
-  }
-  return []
+  await symlink(target, linkName)
 }
 
 export async function repairSharedLinks(name: string, ctx: PlatformContext = platformContext()): Promise<SharedLinkRepair[]> {
@@ -584,15 +530,15 @@ export async function repairSharedLinks(name: string, ctx: PlatformContext = pla
   const repairs: SharedLinkRepair[] = []
   for (const { spec, path: linkName, target } of linkSpecs(profile, ctx)) {
     await ensureSharedTarget(spec, target)
-    const previous = await linkState(linkName, target)
-    let merged: string[] = []
+    const previous = await linkState(spec, linkName, target, ctx)
     let backup: string | null = null
-    if (previous === 'replaced') {
-      merged = await mergeIntoShared(spec, linkName, target)
-      backup = `${linkName}.backup`
+    if (!HEALTHY_LINK_STATES.includes(previous)) {
+      if (previous === 'replaced') backup = await moveAside(linkName)
+      else if (previous === 'foreign') await rm(linkName, { force: true })
+      await mkdir(path.dirname(linkName), { recursive: true })
+      await placeLink(spec, target, linkName, ctx)
     }
-    if (previous !== 'linked') await linkPath(target, linkName, ctx.platform)
-    repairs.push({ ...spec, path: linkName, target, state: await linkState(linkName, target), previous, merged, backup })
+    repairs.push({ ...spec, path: linkName, target, state: await linkState(spec, linkName, target, ctx), previous, backup })
   }
   return repairs
 }
