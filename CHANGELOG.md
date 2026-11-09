@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 (sin publicar)
+## 0.8.0 (2026-11-08)
 
 - Nuevos módulos `profiles`, `settings`, `harness` y `catalog`, más
   `schemas/catalog.v1.json` y `schemas/profiles.v1.json` en el paquete.
