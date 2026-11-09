@@ -1,8 +1,10 @@
 # kit
 
-El contrato común de las herramientas `@kikedealba`: **bita** (tiempo), **atl**
-(Atlassian), **inkwell** (documentación), **recap** (reuniones) y **Den** (la app
-de escritorio).
+El contrato común de las herramientas `@kikedealba`: **den** (el punto de
+entrada), **bita** (tiempo), **nursery** (subagentes y reglas), **gaze**
+(memoria por proyecto), **atl** (Atlassian), **inkwell** (documentación),
+**recap** (reuniones), **tally** (horas en Jira) y **Den** (la app de
+escritorio).
 
 Ninguna herramienta depende de otra. Todas dependen solo de `kit`, y por medio de
 él se encuentran cuando están instaladas juntas: una herramienta que no está
@@ -16,7 +18,7 @@ para ver qué hay instalado.
 
 Node 24 o superior. Funciona en macOS, Windows y Linux.
 
-## Las cinco piezas
+## Las piezas
 
 ### 1. Registro de herramientas instaladas
 
@@ -137,7 +139,8 @@ regenera en cada instalación) con `plugin.json`, `agents/`, `skills/` (de
 
 Sin `agy` en el `PATH` el plugin se genera igual y el paso sale `unavailable` con
 el comando a correr. Antigravity se detecta por el binario `agy` o por
-`~/.gemini/config` (se cambia con `homes.antigravity`). Desinstalar corre
+`~/.gemini/config` (se cambia con `homes.antigravity` o, desde 0.8, con la
+variable `KIT_ANTIGRAVITY_HOME`; `homes.antigravity` gana). Desinstalar corre
 `agy plugin uninstall <herramienta>`.
 
 Los plugins de `agy` no admiten hooks ni servidores MCP, así que los servidores MCP
@@ -230,7 +233,8 @@ El hijo no hereda todo el entorno. `headlessEnv(agent, env)` filtra con una list
 blanca común, y bita, recap e inkwell pueden usarla para lo mismo:
 
 - `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`/`TMP`/`TEMP`, `LANG`, `LC_*`,
-  `TERM`, `XDG_*`, `NVM_*` y `KIT_HEADLESS`.
+  `TERM`, `XDG_*`, `NVM_*`, `DEN_PROFILE` (desde 0.8, para que el perfil llegue
+  a las herramientas anidadas; el resto de `DEN_*` no pasa) y `KIT_HEADLESS`.
 - Proxy y certificados: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` (también en
   minúsculas), `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` y
   `REQUESTS_CA_BUNDLE`.
@@ -429,6 +433,31 @@ Una herramienta que ya trae plugin debe llamar a `installIntegration` sin
 `claude` en `agents`. Si no, vuelve a escribir en `~/.claude` lo que el plugin ya
 trae y Claude Code lo carga dos veces.
 
+#### Entorno de los comandos y escrituras atómicas
+
+Desde 0.8, los comandos que kit corre por su cuenta (`claude plugin …`,
+`claude mcp …`, `agy plugin …`) usan `ctx.env` de `InstallOptions`, no
+`process.env`. Así, `installIntegration({ ctx: platformContext({ env: envFor(perfil, 'all', process.env) }) })`
+instala plugins y servidores MCP en el `CLAUDE_CONFIG_DIR` del perfil. Si se pasa
+`exec`, kit lo usa tal cual.
+
+Toda escritura atómica de kit (`writeJsonFile`, `registerTool`, el almacén de
+credenciales en archivo, `profiles.json` y `settings.json`) resuelve antes el
+destino con `realpath` y crea el temporal (con nombre aleatorio) junto al archivo
+real. Un symlink (por ejemplo, `CLAUDE.md` de un perfil que apunta a
+`~/.claude/CLAUDE.md`) sigue en pie y se actualiza el archivo al que apunta;
+un symlink colgante tampoco se reemplaza: se escribe en su destino. Sin `mode`
+explícito se conserva el modo del archivo que ya existía.
+
+`writeFileAtomic(archivo, contenido, { mode?, dirMode? })` y
+`withFileLock(archivo, fn, { timeoutMs?, staleMs?, retryMs? })` se exportan
+desde la raíz y desde `@kikedealba/kit/atomic`. El candado es `<archivo>.lock`,
+creado de forma atómica con un token propio que solo su dueño borra. Mientras
+dura la sección crítica se refresca su fecha; uno de más de 30 s o de un proceso
+muerto se roba renombrándolo, y solo se borra si sigue siendo el mismo.
+`profiles.json` y `settings.json` se leen y escriben dentro de ese candado, así
+que cambios en paralelo no se pierden.
+
 #### Procesos, notificaciones y Windows
 
 `spawnSpec(comando, args, ctx)` devuelve `{ command, args, windowsVerbatimArguments }`
@@ -466,6 +495,297 @@ comando sin ejecutarlo.
 `KIT_CREDENTIALS=file` fuerza el archivo. `resolveSecret` revisa primero una
 variable de entorno, para CI. El secreto nunca viaja como argumento de línea de
 comandos, salvo en macOS, donde `security` no admite otra vía.
+
+### 6. Perfiles (`@kikedealba/kit/profiles`)
+
+Un perfil es una cuenta. Separa el login de Claude Code y de Codex: cada perfil
+no builtin tiene su propio `CLAUDE_CONFIG_DIR` y `CODEX_HOME`. Gemini, Antigravity
+y opencode usan una sola cuenta en esta versión.
+
+Todo vive bajo la raíz de configuración `<configHome>/kikedealba`
+(`XDG_CONFIG_HOME` o `~/.config`; `%APPDATA%` en Windows). `KIT_CONFIG_DIR`
+reemplaza la raíz completa, pensado para pruebas. `kitConfigRoot(ctx)` la
+devuelve.
+
+`<raíz>/profiles.json` (esquema en `schemas/profiles.v1.json`):
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/KikeDeAlba/kit/main/schemas/profiles.v1.json",
+  "version": 1,
+  "default": "personal",
+  "profiles": {
+    "personal": { "builtin": true },
+    "trabajo": {
+      "claude": "~/.config/kikedealba/profiles/trabajo/claude",
+      "codex": "~/.config/kikedealba/profiles/trabajo/codex",
+      "createdAt": "2026-11-08T17:00:00.000Z"
+    }
+  },
+  "dirs": [{ "path": "~/dev/empresa", "profile": "trabajo" }]
+}
+```
+
+- Nombres: `^[a-z][a-z0-9-]{0,31}$`. Hay exactamente un perfil `builtin`, sin
+  `claude` ni `codex`, y `default` apunta a un perfil que existe.
+- Las rutas bajo `$HOME` se guardan como `~/…` y se expanden al leer. `dirs`
+  guarda la ruta ya resuelta con `realpath`.
+- Si el archivo no existe, equivale a un único perfil builtin llamado `default`.
+  No se crea hasta la primera escritura. Se escribe de forma atómica con modo
+  `0600`; la raíz de configuración (`kikedealba/` o `KIT_CONFIG_DIR`),
+  `profiles/<n>/`, `claude/` y `codex/` se crean con `0700`.
+- Un archivo inválido lanza `ProfileError` con código `PROFILES_INVALID`.
+- Un home de perfil que sea `~/.claude` o `~/.codex`, o que repita la carpeta de
+  otro perfil (o la suya entre `claude` y `codex`), no hace fallar la lectura: un
+  `profiles.json` viejo se sigue leyendo, y el builtin y `removeProfile` siguen
+  funcionando. `addProfile` lo rechaza con `PROFILE_HOME_CONFLICT`,
+  `profileHomeConflicts(n)` lo lista (`{ harness, home, conflictsWith }`,
+  comparando con `realpath`) e `inspectSharedLinks` marca esas entradas como
+  `home-conflict`. En macOS y Windows las rutas se comparan sin distinguir
+  mayúsculas.
+
+```ts
+import { profiles } from '@kikedealba/kit'
+
+const { profile, source } = await profiles.resolveProfile({ cwd: process.cwd() })
+const env = profiles.envFor(profile, 'claude', process.env)
+```
+
+`resolveProfile({ cwd, explicit })` busca en este orden: `explicit`,
+`DEN_PROFILE` del entorno, el prefijo más largo de `dirs` (por segmentos) que
+contenga `realpath(cwd)` y, al final, `default`. Si `explicit` o `DEN_PROFILE`
+nombran un perfil que no existe, lanza `PROFILE_NOT_FOUND`; nunca cae en
+silencio al default.
+
+`envFor(perfil, harness | 'all', baseEnv)` es pura y devuelve una copia:
+
+1. Quita las variables de sesión de los agentes (`withoutHarnessSession`:
+   `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `GEMINI_CLI`,
+   `OPENCODE`, `ANTIGRAVITY_*` de sesión, etc.).
+2. Siempre quita `CLAUDE_CONFIG_DIR` y `CODEX_HOME` heredados.
+3. En un perfil no builtin, con `claude`, `codex` o `all`, quita solo las
+   credenciales de la cuenta del agente, sin importar mayúsculas: los prefijos de
+   `PROFILE_SECRET_ENV_PREFIXES` (`ANTHROPIC_*`, que incluye `ANTHROPIC_VERTEX_*`,
+   `OPENAI_*`, `AZURE_OPENAI_*`, `CLAUDE_CODE_USE_*`, `CLAUDE_CODE_OAUTH_*`,
+   `CLAUDE_CODE_API_KEY*` y `GOOGLE_GENAI_*`) y los nombres de
+   `PROFILE_SECRET_ENV` (`AWS_BEARER_TOKEN_BEDROCK`, `CODEX_API_KEY`,
+   `CODEX_ACCESS_TOKEN`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` y
+   `CLOUD_ML_REGION`). `isProfileSecretEnv(nombre)` aplica la misma regla. No hay
+   patrones por subcadena: `GITHUB_TOKEN`, `NPM_TOKEN`, `AWS_ACCESS_KEY_ID`,
+   `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` o `AWS_PROFILE` pasan, porque la
+   sesión los necesita para trabajar. El builtin las conserva, y con `gemini`,
+   `opencode` o `antigravity` también (esos agentes no cambian de cuenta con el
+   perfil).
+4. En un perfil no builtin define `CLAUDE_CONFIG_DIR` (con `claude` o `all`) y
+   `CODEX_HOME` (con `codex` o `all`).
+5. Siempre define un único `DEN_PROFILE` (quita antes cualquier variante con
+   otras mayúsculas).
+
+Con `gemini`, `antigravity` u `opencode` no define ningún home;
+`profileSupports(harness)` devuelve `false` para que quien llama avise de que
+esos agentes usan una sola cuenta. Las rutas de perfil y `KIT_CONFIG_DIR` deben
+ser absolutas: una ruta de perfil relativa es `PROFILES_INVALID` y un
+`KIT_CONFIG_DIR` relativo se ignora.
+
+| Función | Qué hace |
+|---|---|
+| `listProfiles()` / `getProfile(n)` | Lee el archivo |
+| `addProfile(n)` | Registra el perfil y crea sus carpetas con `0700`. Idempotente: `created: false` si ya existía |
+| `removeProfile(n, { purge })` | Falla con `PROFILE_BUILTIN` o `PROFILE_IS_DEFAULT`; quita sus `dirs` y solo borra la carpeta con `purge`. Devuelve `{ removed, purged, unmapped, logoutRequired }` |
+| `setDefaultProfile(n)` | Cambia el default |
+| `renameBuiltinProfile(n)` | Da nombre al perfil builtin (el asistente de den usa `personal`) |
+| `mapDir(dir, n)` / `unmapDir(dir)` | Asocia o suelta un directorio |
+| `profileHomes(n)` | `{ root, claude, codex }` bajo `<raíz>/profiles/<n>` |
+| `inspectSharedLinks(n)` / `repairSharedLinks(n)` | Revisa y repara los enlaces y copias compartidos |
+| `syncSharedCopies(n)` | Regenera las copias filtradas que faltan o quedaron viejas; no toca una editada |
+| `authStatus(perfil)` | Corre `claude auth status --json` con el entorno del perfil |
+
+Enlaces compartidos. Un perfil enlaza con `~/.claude` y `~/.codex`:
+`CLAUDE.md`, `skills/`, `agents/`, `commands/` y `AGENTS.md` (`SHARED_LINKS`).
+Nunca se enlazan `plugins/`, `projects/`, `.claude.json`, `.credentials.json`,
+`todos/`, `auth.json`, `sessions/` ni `history.jsonl`. `config.toml` de Codex
+**ya no se comparte**: cada perfil tiene el suyo, porque no hay un parser TOML
+fiable para filtrarlo.
+
+`settings.json` de Claude no es un symlink sino una copia filtrada
+(`SHARED_COPIES`): kit escribe `<perfil>/claude/settings.json` desde
+`~/.claude/settings.json` sin `apiKeyHelper`, `awsCredentialExport`,
+`awsAuthRefresh`, `gcpAuthRefresh` ni `otelHeadersHelper`
+(`CLAUDE_SETTINGS_SECRET_KEYS`, sin distinguir mayúsculas), y sin las claves de
+`env` que cumplen `isProfileSecretEnv`, las `OTEL_*HEADERS*` ni
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` o `DEN_PROFILE`
+(`filterSharedClaudeSettings` hace ese filtro). El hash de
+lo escrito queda en `<perfil>/claude/.den-shared.json`, fuera del settings. Si
+el compartido no existe, la copia es `{}`; si no es un objeto JSON válido,
+`inspectSharedLinks` da `invalid-shared` y `syncSharedCopies` y
+`repairSharedLinks` lanzan `SHARED_COPY_INVALID` antes de tocar nada.
+
+> **Aviso:** todo lo demás del `settings.json` compartido se copia tal cual, también
+> `hooks`, `statusLine` y `fileSuggestion`. Son comandos tuyos y en el perfil
+> corren con la cuenta del perfil.
+
+`inspectSharedLinks` da el estado de cada entrada:
+
+| Estado | Qué significa | Sano |
+|---|---|---|
+| `linked` | symlink al compartido | sí |
+| `copied` | en Windows, archivo copiado en vez de enlazado | sí |
+| `generated` | copia filtrada al día | sí |
+| `missing` | no existe | no |
+| `foreign` | symlink a otro lado (también un `settings.json` enlazado de versiones anteriores) | no |
+| `replaced` | Claude Code o Codex lo cambió por algo propio | no |
+| `stale` | el compartido cambió desde la última copia: hay que regenerar | no |
+| `drifted` | el perfil editó su copia | no |
+| `invalid-shared` | `~/.claude/settings.json` no es un objeto JSON válido | no |
+| `home-conflict` | el home del perfil es el compartido o el de otro perfil | no |
+
+`HEALTHY_LINK_STATES` lista los sanos. `syncSharedCopies(n)` regenera las copias
+`missing`, `stale` o `foreign` y deja una `drifted` como está; den y nursery la
+llaman tras cambiar el compartido. `repairSharedLinks` no fusiona nada:
+
+1. Crea el destino compartido de un enlace si falta (vacío para archivos,
+   carpeta para directorios). Nunca reescribe uno que ya existe.
+2. Si un enlace fue reemplazado o una copia está `drifted` o `replaced`, mueve
+   lo del perfil a `<nombre>.backup-<timestamp>` (copia y borra si está en otro
+   volumen) y devuelve esa ruta en `backup`, para que `den doctor` la muestre.
+3. Quita un enlace `foreign`, vuelve a enlazar y regenera las copias. Los estados
+   sanos no se tocan.
+
+Si el home `claude` o `codex` de un perfil resuelve (por ejemplo, con un
+symlink) al home compartido, `syncSharedCopies` y `repairSharedLinks` lanzan
+`PROFILE_HOME_SHARED` sin mover nada; si choca con el de otro perfil (o entre su
+`claude` y su `codex`), lanzan `PROFILE_HOME_CONFLICT`, también sin tocar nada.
+
+`removeProfile(n, { purge: true })` borra la carpeta del perfil pero no puede
+borrar la entrada del Llavero de macOS sin `claude`: en macOS devuelve
+`logoutRequired: true` cuando el perfil tenía home de Claude; en Linux y Windows,
+`false`. Den corre
+`claude auth logout` con `envFor(perfil, 'claude', …)` antes de llamar a
+`removeProfile` con `purge`.
+
+`authStatus` devuelve `{ loggedIn, authMethod, email, orgName,
+subscriptionType, configDirectory }`, o `null` si `claude` no está o no responde
+JSON. Lee la respuesta también cuando `claude` sale con código 1 (sin sesión).
+
+### 7. Configuración (`@kikedealba/kit/settings`)
+
+`<raíz>/settings.json` guarda solo los valores distintos del default, anidados
+por namespace:
+
+```json
+{ "version": 1,
+  "agents": { "maxParallel": 4, "developer": { "model": "sonnet" } },
+  "rules": { "gitflow": false },
+  "harness": { "claude": { "skipPermissions": false } } }
+```
+
+| Clave | Tipo | Default | Dueño | Validación |
+|---|---|---|---|---|
+| `agents.maxParallel` | integer | 10 | nursery | 1–20 |
+| `agents.enabled` | string[] | los 10 roles más los agentes de usuario | nursery | roles conocidos, no vacío |
+| `agents.<role>.model` | string | el del frontmatter de origen | nursery | `MODEL_PATTERN`: `^[a-z0-9][a-z0-9.\-\[\]/#:]*$` |
+| `agents.<role>.maxTurns` | integer | el del frontmatter | nursery | 1–500 |
+| `agents.<role>.effort` | enum | el del frontmatter | nursery | `low`, `medium`, `high`, `xhigh`, `max` |
+| `rules.noAiTrace`, `noComments`, `language`, `worktrees`, `gitflow`, `delegation` | boolean | true | nursery | — |
+| `rules.baseBranch` | string | `develop` | nursery | nombre de rama git válido, solo `[A-Za-z0-9._/-]` |
+| `harness.default` | enum | `claude` | den | `HARNESS_IDS` |
+| `harness.<h>.skipPermissions` | boolean | true | den | — |
+| `harness.<h>.extraArgs` | string[] | [] | den | sin `--`, sin saltos de línea ni NUL; por lo demás libre (es config del propio usuario) |
+| `session.summary.<h>.model` | string | `defaultSummaryModel` del adaptador | bita | `MODEL_PATTERN` |
+| `session.minDurationSec` | integer | 60 | bita | 0–3600 |
+| `tools.<t>.enabled` | boolean | true | den | `kit` no se puede apagar |
+
+`<role>` es uno de los 10 roles de nursery (`NURSERY_ROLES`) o un agente de
+usuario de `<raíz>/agents/<n>.md`. Para los roles de nursery, `agents.<role>.*`
+sin definir vale `undefined`: "lo que diga la fuente". Para un agente de usuario,
+el default sale de su frontmatter. Las claves de `nursery` tienen
+`refresh: 'nursery'`; el resto, `'none'`.
+
+```ts
+import { settings } from '@kikedealba/kit'
+
+await settings.setSetting('agents.maxParallel', '4')
+await settings.getSetting<number>('agents.maxParallel')
+```
+
+- `parseSettingValue(clave, texto)`: boolean acepta `true|false|1|0`, integer en
+  base 10, string[] como lista separada por comas o arreglo JSON.
+- `setSetting` acepta el valor ya tipado o como texto. Si queda igual al default,
+  borra la clave del archivo. Devuelve `{ key, previous, value, refresh }`.
+- `unsetSetting` vuelve al default. `listSettings` expande todos los patrones con
+  `source: 'user' | 'default'` y su dueño. `checkSettings` devuelve
+  `{ ok, errors }` para un doctor.
+- Errores (`SettingsError`): `UNKNOWN_KEY`, `INVALID_VALUE` y `SETTINGS_INVALID`
+  (archivo corrupto; `setSetting` se niega a sobrescribirlo).
+- `onChange(prefijo, handler)` avisa dentro del proceso cuando un valor cambia de
+  verdad. Los manejadores corren en orden y aislados: si uno falla, los demás
+  corren igual, el valor ya quedó guardado y el error vuelve en
+  `change.warnings`; `setSetting` no se rechaza. Entre procesos, el refresco lo
+  orquesta den.
+
+### 8. Adaptadores de agentes (`@kikedealba/kit/harness`)
+
+Los adaptadores de bita (`claude`, `opencode`, `codex`, `gemini`, `antigravity`)
+viven aquí desde 0.8: argumentos de lanzamiento, lectura de transcripciones,
+resumen de sesión y `afterExit`.
+
+```ts
+import { harness } from '@kikedealba/kit'
+
+const adapter = harness.getAdapter('claude')
+const plan = adapter.launchArgs(userArgs, await harness.launchOptionsFor('claude'))
+const turns = await adapter.extractTranscript({ ...ref, profile: 'trabajo' }, baseEnv)
+```
+
+- `adapter.profiles` dice si el agente admite perfiles (`claude` y `codex`).
+- `launchArgs(args, { skipPermissions, extraArgs })`: con `skipPermissions: false`
+  no agrega el flag por defecto (`--allow-dangerously-skip-permissions`,
+  `--dangerously-bypass-approvals-and-sandbox`, `--approval-mode=yolo`, `--auto`,
+  `--dangerously-skip-permissions`). `extraArgs` va tal cual antes de los
+  argumentos del usuario; si ya trae el flag por defecto, no se repite. Sin opciones equivale a `{ skipPermissions: true,
+  extraArgs: [] }`. `launchOptionsFor(id)` las lee de `harness.<id>.*`.
+- `extractTranscript(ref, baseEnv?)` y `summarize({ …, profile, baseEnv? })`
+  calculan su entorno con `harnessEnv(id, profile, baseEnv)`: quitan las
+  variables de sesión y, si hay perfil, aplican `envFor`. Sin perfil
+  (`null` o `undefined`) se comportan como el perfil builtin: quitan
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME` y `DEN_PROFILE` heredados y no definen
+  ninguno. Para quien consume kit (bita, den, nursery), `profile: null`
+  significa el perfil builtin, no "lo que haya en el entorno".
+- Las transcripciones se confinan al home: Claude a `projects/`, Codex a
+  `sessions/` y `archived_sessions/`, Gemini a `tmp/` de `~/.gemini`. El
+  `realpath` del archivo (también el de un `transcriptPath` explícito) debe
+  quedar ahí dentro y el `sessionId` debe cumplir `SESSION_ID_PATTERN`
+  (`^\w[\w-]*$`, sin guion inicial); opencode lo valida antes de
+  `session export`. Si no, devuelven `[]`.
+- El resumen de opencode corre con `--agent plan` y un `opencode.json` temporal
+  (`OPENCODE_SUMMARY_CONFIG`) que niega `bash`, `edit`, `webfetch` y `write`. Un perfil que ya no
+  existe hace que `summarize` devuelva `{ ok: false }`; un nombre vacío se
+  rechaza. **Cambio respecto a bita 1.9:** sin `baseEnv`, los adaptadores parten
+  de `process.env` sin las variables de sesión, pero ya no ponen `BITA_CHILD` ni
+  quitan `BITA_WRAPPER_ID`, `BITA_HARNESS` o `BITA_SESSION_PROJECT`. Quien llama
+  (bita) pasa su `childEnv()` como `baseEnv`.
+- El binario se busca primero en `KIT_HARNESS_BIN_<ID>`, luego en
+  `BITA_HARNESS_BIN_<ID>` (las dos con ruta absoluta) y luego con
+  `findAgentBinarySync`.
+- Los avisos de flags sin equivalente ya no llevan el prefijo `bita:`; quien los
+  imprime pone el suyo.
+
+### 9. Catálogo (`@kikedealba/kit/catalog`)
+
+La lista canónica de herramientas, en orden de instalación: kit, nursery, bita,
+gaze, inkwell, recap, tally y atl.
+
+```ts
+import { catalog } from '@kikedealba/kit'
+
+for (const tool of catalog.CATALOG) console.log(tool.name, tool.package, tool.setup, tool.agentsFlag)
+```
+
+Cada entrada trae `name`, `package`, `bin`, `description`, `homepage`, `setup`
+y `uninstall` (argumentos del binario), `agentsFlag` (si su `setup` acepta
+`--agents`) y `optional`. `DEN_APP` apunta a las releases de Den.app. El paquete
+incluye la misma lista en `schemas/catalog.v1.json`
+(`@kikedealba/kit/schemas/catalog.v1.json`), que Den.app lee al compilar.
 
 ## CLI
 

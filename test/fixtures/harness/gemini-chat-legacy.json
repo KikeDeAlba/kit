@@ -1,0 +1,10 @@
+{
+  "sessionId": "legacy-0001",
+  "projectHash": "abc123",
+  "startTime": "2026-10-20T10:00:00.000Z",
+  "lastUpdated": "2026-10-20T10:00:05.000Z",
+  "messages": [
+    { "id": "u1", "timestamp": "2026-10-20T10:00:01.000Z", "type": "user", "content": "Hola desde el formato viejo" },
+    { "id": "g1", "timestamp": "2026-10-20T10:00:02.000Z", "type": "gemini", "content": "Respuesta en formato viejo" }
+  ]
+}

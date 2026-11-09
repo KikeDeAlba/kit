@@ -78,7 +78,7 @@ export function agentHomes(ctx: PlatformContext = platformContext(), overrides: 
     codex: overrides.codex ?? ctx.env['CODEX_HOME'] ?? join(ctx.home, '.codex'),
     agentsSkills: overrides.agentsSkills ?? join(ctx.env['KIT_AGENTS_HOME'] ?? join(ctx.home, '.agents'), 'skills'),
     gemini: overrides.gemini ?? join(ctx.env['GEMINI_CLI_HOME'] ?? ctx.home, '.gemini'),
-    antigravity: overrides.antigravity ?? join(ctx.home, '.gemini', 'config'),
+    antigravity: overrides.antigravity ?? ctx.env['KIT_ANTIGRAVITY_HOME'] ?? join(ctx.home, '.gemini', 'config'),
     claudeDesktop: overrides.claudeDesktop !== undefined ? overrides.claudeDesktop : claudeDesktopHome(ctx, join),
   }
 }
@@ -226,12 +226,14 @@ async function installMemory(integration: AgentIntegration, agent: MemoryAgent, 
   try {
     const content = renderMemory(await readFile(integration.memory, 'utf8'), agent)
     const current = existsSync(file) ? await readFile(file, 'utf8') : ''
-    const next = upsertMemoryBlock(current, integration.tool, content)
+    const warnings: string[] = []
+    const next = upsertMemoryBlock(current, integration.tool, content, (message) => warnings.push(message))
     if (next === current) return { agent, item: 'memory', state: 'present', detail: `memory block already up to date in ${file}`, path: file }
     await mkdir(path.dirname(file), { recursive: true })
     if (current.length > 0) await writeFile(`${file}.backup`, current)
     await writeFile(file, next)
-    return { agent, item: 'memory', state: 'installed', detail: `memory block written to ${file}`, path: file }
+    const note = warnings.length > 0 ? ` (${warnings.join('; ')}; previous file kept in ${file}.backup)` : ''
+    return { agent, item: 'memory', state: 'installed', detail: `memory block written to ${file}${note}`, path: file }
   } catch (error) {
     return { agent, item: 'memory', state: 'failed', detail: reason(error), path: file }
   }
@@ -257,8 +259,8 @@ function pushed(steps: Step[], step: Step | null): void {
   if (step) steps.push(step)
 }
 
-async function defaultExec(command: string, args: readonly string[]): Promise<string> {
-  return (await run(command, args, { timeoutMs: 120_000 })).stdout
+function defaultExec(ctx: PlatformContext): (command: string, args: readonly string[]) => Promise<string> {
+  return async (command, args) => (await run(command, args, { env: ctx.env, timeoutMs: 120_000 })).stdout
 }
 
 function locator(options: InstallOptions, ctx: PlatformContext): (command: string) => Promise<string | null> {
@@ -313,7 +315,7 @@ async function installClaudeMcp(server: McpServer, options: InstallOptions, ctx:
     ? ['mcp', 'add', '--scope', 'user', '--transport', 'http', server.name, server.url, ...Object.entries(server.headers ?? {}).flatMap(([key, value]) => ['--header', `${key}: ${value}`])]
     : ['mcp', 'add', '--scope', 'user', ...Object.entries(server.env ?? {}).flatMap(([key, value]) => ['--env', `${key}=${value}`]), server.name, '--', ...server.command]
   if (!claude) return { agent: 'claude', item: `mcp ${server.name}`, state: 'unavailable', detail: `claude is not on PATH; run: claude ${args.join(' ')}` }
-  const exec = options.exec ?? defaultExec
+  const exec = options.exec ?? defaultExec(ctx)
   try {
     await exec(claude, ['mcp', 'remove', '--scope', 'user', server.name]).catch(() => undefined)
     await exec(claude, args)
@@ -620,7 +622,7 @@ async function listAntigravityPlugins(exec: NonNullable<InstallOptions['exec']>,
 async function installAntigravityPlugin(integration: AgentIntegration, root: string, options: InstallOptions, ctx: PlatformContext): Promise<Step> {
   const agy = await locator(options, ctx)('agy')
   if (!agy) return { agent: 'antigravity', item: 'plugin', state: 'unavailable', detail: `agy is not on PATH; run: agy plugin install ${root}`, path: root }
-  const exec = options.exec ?? defaultExec
+  const exec = options.exec ?? defaultExec(ctx)
   const entry = (await listAntigravityPlugins(exec, agy))?.find((plugin) => plugin.name === integration.tool)
   if (entry?.path && (await sameTree(root, entry.path))) {
     return { agent: 'antigravity', item: 'plugin', state: 'present', detail: `plugin ${integration.tool} already installed`, path: entry.path }
@@ -661,7 +663,7 @@ async function uninstallAntigravityPlugin(integration: AgentIntegration, options
   const tool = integration.tool
   const agy = await locator(options, ctx)('agy')
   if (!agy) return { agent: 'antigravity', item: 'plugin', state: 'unavailable', detail: `agy is not on PATH; run: agy plugin uninstall ${tool}` }
-  const exec = options.exec ?? defaultExec
+  const exec = options.exec ?? defaultExec(ctx)
   const listed = await listAntigravityPlugins(exec, agy)
   if (listed && !listed.some((plugin) => plugin.name === tool)) return { agent: 'antigravity', item: 'plugin', state: 'skipped', detail: `plugin ${tool} is not installed` }
   try {
@@ -851,7 +853,7 @@ export async function uninstallIntegration(integration: AgentIntegration, option
         const claude = await locator(options, ctx)('claude')
         for (const server of integration.mcp ?? []) {
           if (!claude) continue
-          const ok = await (options.exec ?? defaultExec)(claude, ['mcp', 'remove', '--scope', 'user', server.name]).then(() => true, () => false)
+          const ok = await (options.exec ?? defaultExec(ctx))(claude, ['mcp', 'remove', '--scope', 'user', server.name]).then(() => true, () => false)
           steps.push({ agent, item: `mcp ${server.name}`, state: ok ? 'removed' : 'skipped', detail: ok ? 'removed from Claude Code' : 'not registered' })
         }
       }
@@ -995,7 +997,7 @@ export async function installClaudePlugin(spec: ClaudePluginSpec, options: Insta
     ]
     return [{ agent: 'claude', item, state: 'unavailable', detail: `claude is not on PATH; run: ${manual.join(' && ')}` }]
   }
-  const exec = options.exec ?? defaultExec
+  const exec = options.exec ?? defaultExec(ctx)
   const steps: Step[] = []
   const marketplaces = await readJsonOutput(exec, claude, ['plugin', 'marketplace', 'list', '--json'])
   if (marketplaces?.some((entry) => (entry as { name?: unknown }).name === spec.marketplaceName)) {
@@ -1058,7 +1060,7 @@ export async function uninstallClaudePlugin(spec: ClaudePluginSpec, options: Ins
   const item = `plugin ${id}`
   const claude = await locator(options, ctx)('claude')
   if (!claude) return [{ agent: 'claude', item, state: 'unavailable', detail: `claude is not on PATH; run: claude plugin uninstall ${id} --scope ${scope}` }]
-  const exec = options.exec ?? defaultExec
+  const exec = options.exec ?? defaultExec(ctx)
   const known = await pluginInstalled(exec, claude, spec)
   if (known === false) return [{ agent: 'claude', item, state: 'skipped', detail: `plugin ${id} is not installed` }]
   try {
@@ -1105,7 +1107,7 @@ export async function removeLegacyClaude(integration: AgentIntegration, options:
   }
   if (!options.skipMcp && (integration.mcp ?? []).length > 0) {
     const claude = await locator(options, ctx)('claude')
-    const exec = options.exec ?? defaultExec
+    const exec = options.exec ?? defaultExec(ctx)
     for (const server of integration.mcp ?? []) {
       if (!claude) {
         steps.push({ agent: 'claude', item: `mcp ${server.name}`, state: 'unavailable', detail: `claude is not on PATH; run: claude mcp remove --scope user ${server.name}` })
