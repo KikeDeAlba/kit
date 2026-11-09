@@ -454,6 +454,8 @@ export function sharedHomes(ctx: PlatformContext = platformContext()): Record<Pr
 }
 
 async function linkState(spec: SharedLinkSpec, linkName: string, target: string, ctx: PlatformContext): Promise<SharedLinkState> {
+  const [linkDir, targetDir] = await Promise.all([realOrResolved(path.dirname(linkName)), realOrResolved(path.dirname(target))])
+  if (linkDir === targetDir && path.basename(linkName) === path.basename(target)) return 'linked'
   const info = await lstat(linkName).catch(() => null)
   if (!info) return 'missing'
   if (!info.isSymbolicLink()) {
