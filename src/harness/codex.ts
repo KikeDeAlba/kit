@@ -6,7 +6,7 @@ import { describeFailure, errorMessage, resolveHarnessBin, runProcess, withTempD
 import { harnessEnv } from './profile-env.ts'
 import { harnessBinEnvVars } from './registry.ts'
 import { SESSION_SUMMARY_SCHEMA, buildSummaryPrompt, parseJsonLoose, validateSessionSummary } from './summary.ts'
-import { isRecord, mtimeMs, parseJsonLines, pushTurn, readTextFile, startsWithAny, textOfBlocks, walkFiles } from './transcript.ts'
+import { confinedFile, isRecord, isSessionId, mtimeMs, parseJsonLines, pushTurn, readTextFile, startsWithAny, textOfBlocks, walkFiles } from './transcript.ts'
 import { DEFAULT_LAUNCH_OPTIONS, type HarnessAdapter, type LaunchOptions, type LaunchPlan, type SummaryInput, type SummaryResult, type TranscriptRef, type Turn } from './types.ts'
 
 const LABEL = 'Codex'
@@ -47,6 +47,7 @@ export async function locateCodexRollout(ref: TranscriptRef, env: NodeJS.Process
   if (ref.transcriptPath) return ref.transcriptPath
   const root = join(codexHome(env), 'sessions')
   if (ref.sessionId) {
+    if (!isSessionId(ref.sessionId)) return null
     const suffix = `-${ref.sessionId}.jsonl`
     const matches = await walkFiles(root, (name) => name.startsWith('rollout-') && name.endsWith(suffix))
     return matches.sort().at(-1) ?? null
@@ -134,7 +135,9 @@ export const codexAdapter: HarnessAdapter = {
   },
   launchArgs,
   async extractTranscript(ref: TranscriptRef, baseEnv?: NodeJS.ProcessEnv): Promise<Turn[]> {
-    const file = await locateCodexRollout(ref, await harnessEnv('codex', ref.profile, baseEnv))
+    const env = await harnessEnv('codex', ref.profile, baseEnv)
+    const candidate = await locateCodexRollout(ref, env)
+    const file = candidate === null ? null : await confinedFile(candidate, join(codexHome(env), 'sessions'))
     if (!file) return []
     const text = await readTextFile(file)
     return text === null ? [] : parseCodexRollout(text)

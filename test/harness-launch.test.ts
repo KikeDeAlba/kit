@@ -130,13 +130,16 @@ test('harnessEnv for the builtin profile drops an inherited home but keeps token
   assert.equal(env['DEN_PROFILE'], 'main')
 })
 
-test('harnessEnv without a profile leaves the environment as it came, minus harness sessions', async () => {
-  const base = baseEnv({ CLAUDE_CONFIG_DIR: '/kept', DEN_PROFILE: 'inherited', CLAUDECODE: '1' })
+test('harnessEnv without a profile behaves like the builtin profile: inherited homes and DEN_PROFILE go, credentials stay', async () => {
+  const base = baseEnv({ CLAUDE_CONFIG_DIR: '/inherited', codex_home: '/inherited', DEN_PROFILE: 'inherited', CLAUDECODE: '1', ANTHROPIC_API_KEY: 'keep' })
   const env = await harnessEnv('claude', null, base)
-  assert.equal(env['CLAUDE_CONFIG_DIR'], '/kept')
-  assert.equal(env['DEN_PROFILE'], 'inherited')
+  assert.equal(env['CLAUDE_CONFIG_DIR'], undefined)
+  assert.equal(env['codex_home'], undefined)
+  assert.equal(env['DEN_PROFILE'], undefined)
   assert.equal(env['CLAUDECODE'], undefined)
+  assert.equal(env['ANTHROPIC_API_KEY'], 'keep')
   assert.equal(base['CLAUDECODE'], '1')
+  assert.equal(base['CLAUDE_CONFIG_DIR'], '/inherited')
   assert.notEqual(env, base)
 })
 
@@ -173,7 +176,8 @@ test('a broken KIT_ override disables the binary instead of silently using the B
 })
 
 test('harnessEnv treats undefined like null and rejects an empty profile name', async () => {
-  const base = baseEnv({ CLAUDE_CONFIG_DIR: '/kept' })
-  assert.equal((await harnessEnv('claude', undefined, base))['CLAUDE_CONFIG_DIR'], '/kept')
+  const base = baseEnv({ CLAUDE_CONFIG_DIR: '/inherited', PATH: '/bin' })
+  assert.deepEqual(await harnessEnv('claude', undefined, base), await harnessEnv('claude', null, base))
+  assert.equal((await harnessEnv('claude', undefined, base))['CLAUDE_CONFIG_DIR'], undefined)
   await assert.rejects(harnessEnv('claude', '', base), /empty/)
 })

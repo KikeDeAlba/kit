@@ -1,9 +1,26 @@
-import { readFile, readdir, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile, readdir, realpath, stat } from 'node:fs/promises'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import type { Turn } from './types.ts'
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export const SESSION_ID_PATTERN = /^[\w-]+$/
+
+export function isSessionId(value: unknown): value is string {
+  return typeof value === 'string' && SESSION_ID_PATTERN.test(value)
+}
+
+export async function confinedFile(file: string, root: string): Promise<string | null> {
+  try {
+    const [real, base] = await Promise.all([realpath(file), realpath(root)])
+    const rel = relative(base, real)
+    if (rel.length === 0 || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null
+    return real
+  } catch {
+    return null
+  }
 }
 
 export async function readTextFile(file: string): Promise<string | null> {

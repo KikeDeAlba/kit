@@ -99,7 +99,7 @@ async function summarize(input: SummaryInput): Promise<SummaryResult> {
     let last: SummaryResult = { ok: false, error: 'opencode was not called' }
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
-        const args = ['run', '--standalone', '--format', 'json', '-m', model, '-f', transcriptFile]
+        const args = ['run', '--standalone', '--format', 'json', '--agent', 'plan', '-m', model, '-f', transcriptFile]
         const result = await runProcess(bin, args, { input: instructions, env, cwd: dir, timeoutMs: remainingMs(deadline) })
         const events = parseOpenCodeEvents(result.stdout)
         for (const id of events.sessionIds) if (!sessions.includes(id)) sessions.push(id)
