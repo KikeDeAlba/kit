@@ -66,6 +66,10 @@
       "types": "./dist/catalog.d.ts",
       "default": "./dist/catalog.js"
     },
+    "./atomic": {
+      "types": "./dist/atomic.d.ts",
+      "default": "./dist/atomic.js"
+    },
     "./schemas/catalog.v1.json": "./schemas/catalog.v1.json",
     "./schemas/profiles.v1.json": "./schemas/profiles.v1.json"
   },
@@ -76,6 +80,7 @@
     "dist",
     "schemas",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "publishConfig": {
