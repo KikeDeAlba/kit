@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import { accessSync, constants, statSync } from 'node:fs'
-import { access, stat } from 'node:fs/promises'
+import { access, mkdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -55,6 +55,18 @@ export function toolDirs(tool: string, ctx: PlatformContext = platformContext())
     data: p.join(dataHome(ctx), tool),
     state: p.join(stateHome(ctx), tool),
   }
+}
+
+export function kitConfigRoot(ctx: PlatformContext = platformContext()): string {
+  const override = ctx.env['KIT_CONFIG_DIR']
+  if (override && pathApi(ctx).isAbsolute(override)) return override
+  return pathApi(ctx).join(configHome(ctx), 'kikedealba')
+}
+
+export async function ensureKitConfigRoot(ctx: PlatformContext = platformContext()): Promise<string> {
+  const root = kitConfigRoot(ctx)
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  return root
 }
 
 export function pathDelimiter(ctx: PlatformContext = platformContext()): string {

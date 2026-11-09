@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { ENVELOPE_VERSION, parseEnvelope, type Envelope } from './envelope.ts'
 import { configHome, platformContext, run, which, type PlatformContext } from './platform.ts'
+import { writeFileAtomic } from './atomic.ts'
 import { satisfiesMinimum } from './semver.ts'
 
 export const REGISTRY_ENV_VAR = 'KIT_REGISTRY_DIR'
@@ -119,9 +120,7 @@ export async function registerTool(manifest: ToolManifest, ctx: PlatformContext 
   const dir = registryDir(ctx)
   await mkdir(dir, { recursive: true })
   const target = path.join(dir, `${manifest.name}.json`)
-  const temporary = `${target}.${process.pid}.tmp`
-  await writeFile(temporary, `${JSON.stringify({ ...manifest, installedAt: new Date().toISOString() }, null, 2)}\n`)
-  await rename(temporary, target)
+  await writeFileAtomic(target, `${JSON.stringify({ ...manifest, installedAt: new Date().toISOString() }, null, 2)}\n`)
   return target
 }
 

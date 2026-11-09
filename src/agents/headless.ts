@@ -108,6 +108,7 @@ export const HEADLESS_ENV_ALLOWLIST: readonly string[] = [
   'SSL_CERT_DIR',
   'REQUESTS_CA_BUNDLE',
   'KIT_HEADLESS',
+  'DEN_PROFILE',
 ]
 
 export const HEADLESS_ENV_PREFIXES: readonly string[] = ['LC_', 'XDG_', 'NVM_']
