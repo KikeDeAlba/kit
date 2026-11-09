@@ -91,7 +91,7 @@ test('claude and codex only read transcripts that resolve inside projects/ and s
   const dir = claudeProjectDir(cwd, { HOME: root })
   mkdirSync(dir, { recursive: true })
   copyFileSync(join(fixtures, 'claude-session.jsonl'), join(root, '.claude', 'evil.jsonl'))
-  for (const sessionId of ['../../evil', '..', 'a/b', 'a b', 'x.jsonl']) {
+  for (const sessionId of ['../../evil', '..', 'a/b', 'a b', 'x.jsonl', '-x', '--help']) {
     assert.deepEqual(await claude.extractTranscript(ref('claude', { cwd, sessionId })), [], sessionId)
     assert.deepEqual(await codex.extractTranscript(ref('codex', { sessionId })), [], sessionId)
   }
@@ -138,18 +138,28 @@ test('codex locates rollouts by session id and by cwd and time window under the 
   }
 })
 
+test('codex also reads archived rollouts under archived_sessions/', async () => {
+  const sessionId = '019a0000-0000-7000-8000-0000000000aa'
+  const file = stage(join(root, '.codex'), 'archived_sessions', 'codex-rollout.jsonl', `rollout-2026-10-01T10-00-00-${sessionId}.jsonl`)
+  assert.equal((await getAdapter('codex').extractTranscript(ref('codex', { sessionId }))).length, 2)
+  assert.equal((await getAdapter('codex').extractTranscript(ref('codex', { transcriptPath: file }))).length, 2)
+})
+
 test('gemini applies rewinds and patches and skips thoughts and info records', async () => {
-  const turns = await getAdapter('gemini').extractTranscript(ref('gemini', { transcriptPath: join(fixtures, 'gemini-chat.jsonl') }))
+  const gemini = join(root, '.gemini', 'tmp', 'project', 'chats')
+  const turns = await getAdapter('gemini').extractTranscript(ref('gemini', { transcriptPath: stage(gemini, '', 'gemini-chat.jsonl') }))
   assert.deepEqual(turns, [
     { role: 'user', text: 'Revisa el lector de transcripts' },
     { role: 'assistant', text: 'El lector ya filtra los mensajes meta.' },
   ])
-  const legacy = await getAdapter('gemini').extractTranscript(ref('gemini', { transcriptPath: join(fixtures, 'gemini-chat-legacy.json') }))
+  const legacy = await getAdapter('gemini').extractTranscript(ref('gemini', { transcriptPath: stage(gemini, '', 'gemini-chat-legacy.json') }))
   assert.deepEqual(legacy, [
     { role: 'user', text: 'Hola desde el formato viejo' },
     { role: 'assistant', text: 'Respuesta en formato viejo' },
   ])
   assert.deepEqual(await getAdapter('gemini').extractTranscript(ref('gemini', { sessionId: 'x' })), [])
+  assert.deepEqual(await getAdapter('gemini').extractTranscript(ref('gemini', { transcriptPath: join(fixtures, 'gemini-chat.jsonl') })), [])
+  assert.deepEqual(await getAdapter('gemini').extractTranscript(ref('gemini', { transcriptPath: join(root, '.gemini', 'settings.json') })), [])
 })
 
 test('opencode exports the session through the binary and parses both export formats', async () => {
@@ -179,6 +189,7 @@ test('opencode exports the session through the binary and parses both export for
     ])
 
     assert.deepEqual(await getAdapter('opencode').extractTranscript(ref('opencode', { cwd: dir })), [])
+    for (const sessionId of ['--help', '../x', 'a b']) assert.deepEqual(await getAdapter('opencode').extractTranscript(ref('opencode', { sessionId, cwd: dir })), [], sessionId)
     assert.equal(readFakeBinCalls(log).length, 2)
 
     process.env['FAKE_BIN_EXIT'] = '1'

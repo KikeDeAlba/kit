@@ -23,7 +23,7 @@ process.stdin.on('end', () => {
   const after = (flag) => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : undefined }
   for (const flag of ['-f', '--output-schema']) { const file = after(flag); if (file) files[flag] = read(file) }
   files['.gemini/settings.json'] = read(path.join(process.cwd(), '.gemini', 'settings.json'))
-  if (process.env.OPENCODE_CONFIG_DIR) { try { files.OPENCODE_CONFIG_DIR = fs.readdirSync(process.env.OPENCODE_CONFIG_DIR) } catch { files.OPENCODE_CONFIG_DIR = null } }
+  if (process.env.OPENCODE_CONFIG_DIR) { try { files.OPENCODE_CONFIG_DIR = fs.readdirSync(process.env.OPENCODE_CONFIG_DIR) } catch { files.OPENCODE_CONFIG_DIR = null } files['opencode.json'] = read(path.join(process.env.OPENCODE_CONFIG_DIR, 'opencode.json')) }
   let index = 0
   if (log) {
     index = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\\n').filter(Boolean).length : 0

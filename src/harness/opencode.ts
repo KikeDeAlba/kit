@@ -5,13 +5,18 @@ import { describeFailure, errorMessage, remainingMs, resolveHarnessBin, runProce
 import { harnessEnv } from './profile-env.ts'
 import { harnessBinEnvVars } from './registry.ts'
 import { parseJsonLoose, retryInstructions, summaryContext, summaryInstructions, validateSessionSummary } from './summary.ts'
-import { isRecord, parseJsonLines, pushTurn, textOfBlocks } from './transcript.ts'
+import { isRecord, isSessionId, parseJsonLines, pushTurn, textOfBlocks } from './transcript.ts'
 import { DEFAULT_LAUNCH_OPTIONS, type HarnessAdapter, type LaunchOptions, type LaunchPlan, type SummaryInput, type SummaryResult, type TranscriptRef, type Turn } from './types.ts'
 
 const LABEL = 'OpenCode'
 const DEFAULT_FLAG = '--auto'
 const EXPORT_TIMEOUT_MS = 60_000
 const DELETE_TIMEOUT_MS = 15_000
+
+export const OPENCODE_SUMMARY_CONFIG = {
+  $schema: 'https://opencode.ai/config.json',
+  permission: { bash: 'deny', edit: 'deny', webfetch: 'deny', write: 'deny' },
+} as const
 
 function launchArgs(userArgs: readonly string[], options: LaunchOptions = DEFAULT_LAUNCH_OPTIONS): LaunchPlan {
   const parsed = parseClaudeArgs(userArgs)
@@ -89,6 +94,7 @@ async function summarize(input: SummaryInput): Promise<SummaryResult> {
     const transcriptFile = join(dir, 'transcript.txt')
     try {
       await mkdir(configDir)
+      await writeFile(join(configDir, 'opencode.json'), JSON.stringify(OPENCODE_SUMMARY_CONFIG))
       await writeFile(transcriptFile, summaryContext(input))
     } catch (error) {
       return { ok: false, error: `opencode workspace: ${errorMessage(error)}` }
@@ -132,7 +138,7 @@ export const opencodeAdapter: HarnessAdapter = {
   },
   launchArgs,
   async extractTranscript(ref: TranscriptRef, baseEnv?: NodeJS.ProcessEnv): Promise<Turn[]> {
-    if (!ref.sessionId) return []
+    if (!isSessionId(ref.sessionId)) return []
     const env = await harnessEnv('opencode', ref.profile, baseEnv)
     const bin = opencodeAdapter.resolveBin(env)
     if (!bin) return []

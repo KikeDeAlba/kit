@@ -6,7 +6,7 @@ import { describeFailure, errorMessage, remainingMs, resolveHarnessBin, runProce
 import { harnessEnv } from './profile-env.ts'
 import { harnessBinEnvVars } from './registry.ts'
 import { parseJsonLoose, retryInstructions, summaryContext, summaryInstructions, validateSessionSummary } from './summary.ts'
-import { isRecord, parseJsonLines, pushTurn, readTextFile, textOfBlocks } from './transcript.ts'
+import { confinedFile, isRecord, parseJsonLines, pushTurn, readTextFile, textOfBlocks } from './transcript.ts'
 import { DEFAULT_LAUNCH_OPTIONS, type HarnessAdapter, type LaunchOptions, type LaunchPlan, type SummaryInput, type SummaryResult, type TranscriptRef, type Turn } from './types.ts'
 
 const LABEL = 'Gemini'
@@ -244,9 +244,11 @@ export const geminiAdapter: HarnessAdapter = {
     return geminiAdapter.resolveBin(env) !== null
   },
   launchArgs,
-  async extractTranscript(ref: TranscriptRef): Promise<Turn[]> {
+  async extractTranscript(ref: TranscriptRef, baseEnv?: NodeJS.ProcessEnv): Promise<Turn[]> {
     if (!ref.transcriptPath) return []
-    const text = await readTextFile(ref.transcriptPath)
+    const file = await confinedFile(ref.transcriptPath, join(geminiHomeDir(baseEnv ?? process.env), 'tmp'))
+    if (!file) return []
+    const text = await readTextFile(file)
     return text === null ? [] : parseGeminiChat(text)
   },
   summarize,

@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { droppedWarning, parseClaudeArgs } from './args.ts'
 import { describeFailure, errorMessage, resolveHarnessBin, runProcess, withTempDir } from './process.ts'
 import { harnessEnv } from './profile-env.ts'
@@ -16,6 +16,11 @@ const LOCATE_GRACE_MS = 60_000
 
 export function codexHome(env: NodeJS.ProcessEnv = process.env): string {
   return env['CODEX_HOME'] || join(env['HOME'] || homedir(), '.codex')
+}
+
+export function codexTranscriptRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const home = codexHome(env)
+  return [join(home, 'sessions'), join(home, 'archived_sessions')]
 }
 
 export function parseCodexRollout(text: string): Turn[] {
@@ -45,18 +50,19 @@ function rolloutCwd(text: string): string | null {
 
 export async function locateCodexRollout(ref: TranscriptRef, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   if (ref.transcriptPath) return ref.transcriptPath
-  const root = join(codexHome(env), 'sessions')
+  const roots = codexTranscriptRoots(env)
+  const walk = async (accept: (name: string) => boolean) => (await Promise.all(roots.map((root) => walkFiles(root, accept)))).flat()
   if (ref.sessionId) {
     if (!isSessionId(ref.sessionId)) return null
     const suffix = `-${ref.sessionId}.jsonl`
-    const matches = await walkFiles(root, (name) => name.startsWith('rollout-') && name.endsWith(suffix))
-    return matches.sort().at(-1) ?? null
+    const matches = await walk((name) => name.startsWith('rollout-') && name.endsWith(suffix))
+    return matches.sort((a, b) => basename(a).localeCompare(basename(b))).at(-1) ?? null
   }
   const from = Date.parse(ref.startedAt)
   const to = Date.parse(ref.endedAt) + LOCATE_GRACE_MS
   if (Number.isNaN(from) || Number.isNaN(to)) return null
   const candidates: { file: string; mtime: number }[] = []
-  for (const file of await walkFiles(root, (name) => name.startsWith('rollout-') && name.endsWith('.jsonl'))) {
+  for (const file of await walk((name) => name.startsWith('rollout-') && name.endsWith('.jsonl'))) {
     const mtime = await mtimeMs(file)
     if (mtime !== null && mtime >= from && mtime <= to) candidates.push({ file, mtime })
   }
@@ -137,7 +143,11 @@ export const codexAdapter: HarnessAdapter = {
   async extractTranscript(ref: TranscriptRef, baseEnv?: NodeJS.ProcessEnv): Promise<Turn[]> {
     const env = await harnessEnv('codex', ref.profile, baseEnv)
     const candidate = await locateCodexRollout(ref, env)
-    const file = candidate === null ? null : await confinedFile(candidate, join(codexHome(env), 'sessions'))
+    let file: string | null = null
+    for (const root of candidate === null ? [] : codexTranscriptRoots(env)) {
+      file = await confinedFile(candidate as string, root)
+      if (file) break
+    }
     if (!file) return []
     const text = await readTextFile(file)
     return text === null ? [] : parseCodexRollout(text)
