@@ -738,8 +738,33 @@ test('repeated or shared profile homes are read fine, reported by inspect, refus
   assert.equal(old['claude/settings.json'], 'home-conflict')
   assert.equal(old['codex/AGENTS.md'], 'missing')
   await assert.rejects(addProfile('fresh', ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_HOME_CONFLICT')
+  const conflict = (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_HOME_CONFLICT'
+  await assert.rejects(syncSharedCopies('twin', ctx), conflict)
+  await assert.rejects(repairSharedLinks('twin', ctx), conflict)
+  await assert.rejects(repairSharedLinks('old', ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_HOME_SHARED')
+  assert.equal(existsSync(path.join(ctx.home, 'x', 'same')), false)
+  assert.equal(existsSync(homes.root), false)
+  assert.equal(existsSync(path.join(ctx.home, '.claude')), false)
   assert.equal((await resolveProfile({}, ctx)).profile.name, 'personal')
   await removeProfile('old', {}, ctx)
   await removeProfile('twin', {}, ctx)
   assert.equal((await addProfile('other', ctx)).created, true)
+})
+
+test('sync and repair refuse a profile whose home is also another profile home, without touching anything', { skip: posixOnly }, async (t) => {
+  const ctx = await sandboxed(t)
+  await mkdir(path.dirname(profilesPath(ctx)), { recursive: true })
+  await writeFile(profilesPath(ctx), JSON.stringify({
+    version: 1,
+    default: 'personal',
+    profiles: { personal: { builtin: true }, one: { claude: '~/p/shared-claude', codex: '~/p/one/codex' }, two: { claude: '~/p/shared-claude', codex: '~/p/two/codex' } },
+  }))
+  const conflict = (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_HOME_CONFLICT' && /profile "(one|two)" \(claude\)/.test(error.message)
+  for (const name of ['one', 'two']) {
+    await assert.rejects(syncSharedCopies(name, ctx), conflict, name)
+    await assert.rejects(repairSharedLinks(name, ctx), conflict, name)
+  }
+  assert.equal(existsSync(path.join(ctx.home, 'p')), false)
+  assert.equal(existsSync(path.join(ctx.home, '.claude')), false)
+  assert.equal(existsSync(path.join(ctx.home, '.codex')), false)
 })

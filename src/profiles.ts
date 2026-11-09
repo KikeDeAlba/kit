@@ -562,6 +562,12 @@ function sharedEntries(profile: Profile, specs: readonly SharedLinkSpec[], ctx: 
 
 async function assertSeparateHomes(profile: Profile, ctx: PlatformContext): Promise<void> {
   if (profile.builtin) return
+  await assertSharedHomesApart(profile, ctx)
+  const [conflict] = await profileHomeConflicts(profile.name, ctx)
+  if (conflict) throw new ProfileError('PROFILE_HOME_CONFLICT', `profile "${profile.name}" ${conflict.harness} home ${conflict.home} is also used by ${conflict.conflictsWith}`)
+}
+
+async function assertSharedHomesApart(profile: Profile, ctx: PlatformContext): Promise<void> {
   const shared = sharedHomes(ctx)
   for (const harness of PROFILE_HARNESSES) {
     const home = profile[harness]
