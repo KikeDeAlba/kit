@@ -12,6 +12,7 @@ import { createFakeBin, readFakeBinCalls } from './fake-bin.ts'
 const fixtures = join(import.meta.dirname, 'fixtures', 'harness')
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'kit-transcripts-')))
 process.env['HOME'] = root
+process.env['GEMINI_CLI_HOME'] = root
 process.env['KIT_NO_EVENTS'] = '1'
 after(() => rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }))
 
