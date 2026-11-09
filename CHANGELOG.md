@@ -32,14 +32,23 @@
   `otelHeadersHelper` ni credenciales en `env`) con su hash en `.den-shared.json`.
   Nuevos estados `generated`, `stale` y `drifted`, `syncSharedCopies(n)`,
   `filterSharedClaudeSettings`, `SHARED_COPIES` y el campo `strategy` en
-  `SharedLinkSpec`. Codex `config.toml` ya no se comparte.
-- `parseProfiles` rechaza homes de perfil que sean los compartidos o que se
-  repitan; inspect, sync y repair lanzan `PROFILE_HOME_SHARED` si un home resuelve
-  al compartido (antes repair lo trataba como enlazado).
-- `removeProfile` devuelve `logoutRequired`.
-- Claude y Codex confinan las transcripciones a `projects/` y `sessions/` del home
-  y validan el `sessionId`.
-- El resumen de opencode usa `--agent plan`.
+  `SharedLinkSpec`. Codex `config.toml` ya no se comparte. El filtro también
+  quita `gcpAuthRefresh` (claves sin distinguir mayúsculas) y, en `env`,
+  `OTEL_*HEADERS*`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` y `DEN_PROFILE`. Un
+  compartido inválido da `invalid-shared` en inspect; sync y repair lanzan
+  `SHARED_COPY_INVALID` antes de tocar nada. Hooks, `statusLine` y
+  `fileSuggestion` se copian tal cual.
+- Homes de perfil repetidos o iguales al compartido: la lectura no falla,
+  `addProfile` lanza `PROFILE_HOME_CONFLICT`, `profileHomeConflicts(n)` los lista
+  e inspect da `home-conflict`; sync y repair lanzan `PROFILE_HOME_SHARED` si un
+  home resuelve al compartido (antes repair lo trataba como enlazado).
+- `removeProfile` devuelve `logoutRequired`, `true` solo en macOS.
+- Transcripciones confinadas al home: Claude a `projects/`, Codex a `sessions/` y
+  `archived_sessions/`, Gemini a `tmp/`. `sessionId` validado con
+  `SESSION_ID_PATTERN` (`^\w[\w-]*$`), también en opencode antes de
+  `session export`.
+- El resumen de opencode usa `--agent plan` y un `opencode.json` que niega
+  `bash`, `edit`, `webfetch` y `write` (`OPENCODE_SUMMARY_CONFIG`).
 - `session.summary.<h>.model` usa `MODEL_PATTERN` (ahora exportado y con `/`,
   `#` y `:`); `harness.<h>.extraArgs` rechaza saltos de línea y NUL. La raíz de
   configuración se crea con `0700` (`ensureKitConfigRoot`).

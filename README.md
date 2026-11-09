@@ -534,9 +534,15 @@ devuelve.
   No se crea hasta la primera escritura. Se escribe de forma atómica con modo
   `0600`; la raíz de configuración (`kikedealba/` o `KIT_CONFIG_DIR`),
   `profiles/<n>/`, `claude/` y `codex/` se crean con `0700`.
-- Un archivo inválido lanza `ProfileError` con código `PROFILES_INVALID`. También
-  lo es un perfil cuyo `claude` o `codex` sea `~/.claude` o `~/.codex`, o que
-  repita la carpeta de otro perfil (o la suya entre `claude` y `codex`).
+- Un archivo inválido lanza `ProfileError` con código `PROFILES_INVALID`.
+- Un home de perfil que sea `~/.claude` o `~/.codex`, o que repita la carpeta de
+  otro perfil (o la suya entre `claude` y `codex`), no hace fallar la lectura: un
+  `profiles.json` viejo se sigue leyendo, y el builtin y `removeProfile` siguen
+  funcionando. `addProfile` lo rechaza con `PROFILE_HOME_CONFLICT`,
+  `profileHomeConflicts(n)` lo lista (`{ harness, home, conflictsWith }`,
+  comparando con `realpath`) e `inspectSharedLinks` marca esas entradas como
+  `home-conflict`. En macOS y Windows las rutas se comparan sin distinguir
+  mayúsculas.
 
 ```ts
 import { profiles } from '@kikedealba/kit'
@@ -604,11 +610,19 @@ fiable para filtrarlo.
 `settings.json` de Claude no es un symlink sino una copia filtrada
 (`SHARED_COPIES`): kit escribe `<perfil>/claude/settings.json` desde
 `~/.claude/settings.json` sin `apiKeyHelper`, `awsCredentialExport`,
-`awsAuthRefresh` ni `otelHeadersHelper`, y sin las claves de `env` que cumplen
-`isProfileSecretEnv` (`filterSharedClaudeSettings` hace ese filtro). El hash de
+`awsAuthRefresh`, `gcpAuthRefresh` ni `otelHeadersHelper`
+(`CLAUDE_SETTINGS_SECRET_KEYS`, sin distinguir mayúsculas), y sin las claves de
+`env` que cumplen `isProfileSecretEnv`, las `OTEL_*HEADERS*` ni
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` o `DEN_PROFILE`
+(`filterSharedClaudeSettings` hace ese filtro). El hash de
 lo escrito queda en `<perfil>/claude/.den-shared.json`, fuera del settings. Si
-el compartido no existe, la copia es `{}`; si no es un objeto JSON válido, lanza
-`SHARED_COPY_INVALID`.
+el compartido no existe, la copia es `{}`; si no es un objeto JSON válido,
+`inspectSharedLinks` da `invalid-shared` y `syncSharedCopies` y
+`repairSharedLinks` lanzan `SHARED_COPY_INVALID` antes de tocar nada.
+
+> **Aviso:** todo lo demás del `settings.json` compartido se copia tal cual, también
+> `hooks`, `statusLine` y `fileSuggestion`. Son comandos tuyos y en el perfil
+> corren con la cuenta del perfil.
 
 `inspectSharedLinks` da el estado de cada entrada:
 
@@ -622,6 +636,8 @@ el compartido no existe, la copia es `{}`; si no es un objeto JSON válido, lanz
 | `replaced` | Claude Code o Codex lo cambió por algo propio | no |
 | `stale` | el compartido cambió desde la última copia: hay que regenerar | no |
 | `drifted` | el perfil editó su copia | no |
+| `invalid-shared` | `~/.claude/settings.json` no es un objeto JSON válido | no |
+| `home-conflict` | el home del perfil es el compartido o el de otro perfil | no |
 
 `HEALTHY_LINK_STATES` lista los sanos. `syncSharedCopies(n)` regenera las copias
 `missing`, `stale` o `foreign` y deja una `drifted` como está; den y nursery la
@@ -636,12 +652,13 @@ llaman tras cambiar el compartido. `repairSharedLinks` no fusiona nada:
    sanos no se tocan.
 
 Si el home `claude` o `codex` de un perfil resuelve (por ejemplo, con un
-symlink) al home compartido, `inspectSharedLinks`, `syncSharedCopies` y
-`repairSharedLinks` lanzan `PROFILE_HOME_SHARED` sin mover nada.
+symlink) al home compartido, `syncSharedCopies` y `repairSharedLinks` lanzan
+`PROFILE_HOME_SHARED` sin mover nada.
 
 `removeProfile(n, { purge: true })` borra la carpeta del perfil pero no puede
-borrar la entrada del Llavero de macOS sin `claude`: devuelve
-`logoutRequired: true` cuando el perfil tenía home de Claude. Den corre
+borrar la entrada del Llavero de macOS sin `claude`: en macOS devuelve
+`logoutRequired: true` cuando el perfil tenía home de Claude; en Linux y Windows,
+`false`. Den corre
 `claude auth logout` con `envFor(perfil, 'claude', …)` antes de llamar a
 `removeProfile` con `purge`.
 
@@ -731,13 +748,16 @@ const turns = await adapter.extractTranscript({ ...ref, profile: 'trabajo' }, ba
   variables de sesión y, si hay perfil, aplican `envFor`. Sin perfil
   (`null` o `undefined`) se comportan como el perfil builtin: quitan
   `CLAUDE_CONFIG_DIR`, `CODEX_HOME` y `DEN_PROFILE` heredados y no definen
-  ninguno.
-- Claude y Codex solo leen transcripciones dentro de `projects/` y `sessions/`
-  del home del perfil: el `sessionId` debe cumplir `^[\w-]+$` y el `realpath`
-  del archivo (también el de un `transcriptPath` explícito) debe quedar ahí
-  dentro; si no, devuelven `[]`.
-- El resumen de opencode corre con `--agent plan` (solo lectura), igual que
-  headless. Un perfil que ya no
+  ninguno. Para quien consume kit (bita, den, nursery), `profile: null`
+  significa el perfil builtin, no "lo que haya en el entorno".
+- Las transcripciones se confinan al home: Claude a `projects/`, Codex a
+  `sessions/` y `archived_sessions/`, Gemini a `tmp/` de `~/.gemini`. El
+  `realpath` del archivo (también el de un `transcriptPath` explícito) debe
+  quedar ahí dentro y el `sessionId` debe cumplir `SESSION_ID_PATTERN`
+  (`^\w[\w-]*$`, sin guion inicial); opencode lo valida antes de
+  `session export`. Si no, devuelven `[]`.
+- El resumen de opencode corre con `--agent plan` y un `opencode.json` temporal
+  (`OPENCODE_SUMMARY_CONFIG`) que niega `bash`, `edit`, `webfetch` y `write`. Un perfil que ya no
   existe hace que `summarize` devuelva `{ ok: false }`; un nombre vacío se
   rechaza. **Cambio respecto a bita 1.9:** sin `baseEnv`, los adaptadores parten
   de `process.env` sin las variables de sesión, pero ya no ponen `BITA_CHILD` ni
