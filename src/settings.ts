@@ -4,7 +4,7 @@ import { parseFrontmatter } from './agents/markdown.ts'
 import { withFileLock, writeFileAtomic } from './atomic.ts'
 import { CATALOG, CATALOG_TOOL_NAMES, catalogTool } from './catalog.ts'
 import { HARNESS_IDS, type HarnessId } from './harness/types.ts'
-import { kitConfigRoot, platformContext, type PlatformContext } from './platform.ts'
+import { ensureKitConfigRoot, kitConfigRoot, platformContext, type PlatformContext } from './platform.ts'
 
 export const SETTINGS_VERSION = 1
 
@@ -69,7 +69,7 @@ export const RULE_FLAGS = ['noAiTrace', 'noComments', 'language', 'worktrees', '
 export const AGENT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export const USER_AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,39}$/
 
-const MODEL_PATTERN = /^[a-z0-9.\-[\]]+$/
+export const MODEL_PATTERN = /^[a-z0-9][a-z0-9.\-[\]/#:]*$/
 const RESERVED_ROLE_NAMES = new Set(['enabled'])
 
 function pathApi(ctx: PlatformContext): path.PlatformPath {
@@ -218,9 +218,10 @@ function checkValue(key: string, match: KeyMatch, value: unknown): SettingValue 
   } else if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
     throw invalidValue(key, 'expected a list of strings')
   }
-  if (def.pattern === 'agents.<role>.model' && !MODEL_PATTERN.test(value as string)) throw invalidValue(key, `must match ${MODEL_PATTERN.source}`)
+  if ((def.pattern === 'agents.<role>.model' || def.pattern === 'session.summary.<h>.model') && !MODEL_PATTERN.test(value as string)) throw invalidValue(key, `must match ${MODEL_PATTERN.source}`)
   if (def.pattern === 'rules.baseBranch' && !isValidBranchName(value as string)) throw invalidValue(key, 'is not a valid git branch name')
   if (def.pattern === 'harness.<h>.extraArgs' && (value as string[]).includes('--')) throw invalidValue(key, 'cannot contain --')
+  if (def.pattern === 'harness.<h>.extraArgs' && (value as string[]).some((item) => /[\r\n\0]/.test(item))) throw invalidValue(key, 'arguments cannot contain line breaks or NUL')
   if (def.pattern === 'agents.enabled' && (value as string[]).length === 0) throw invalidValue(key, 'cannot be empty')
   if (def.pattern === 'tools.<t>.enabled' && value === false) {
     const tool = catalogTool(match.params['t'] ?? '')
@@ -468,6 +469,7 @@ export async function setSetting(key: string, value: SettingValue | string, ctx:
   const match = await resolveKey(key, ctx)
   const parsed = typeof value === 'string' && match.def.type !== 'string' && match.def.type !== 'enum' ? parseRaw(key, match.def, value) : value
   const checked = await checkValueAsync(key, match, parsed, ctx)
+  await ensureKitConfigRoot(ctx)
   const change = await withFileLock(settingsPath(ctx), async (): Promise<SettingChange> => {
     const tree = await readTree(ctx)
     const before = await entryFor(tree, key, match, ctx)
@@ -481,6 +483,7 @@ export async function setSetting(key: string, value: SettingValue | string, ctx:
 
 export async function unsetSetting(key: string, ctx: PlatformContext = platformContext()): Promise<SettingChange> {
   const match = await resolveKey(key, ctx)
+  await ensureKitConfigRoot(ctx)
   const change = await withFileLock(settingsPath(ctx), async (): Promise<SettingChange> => {
     const tree = await readTree(ctx)
     const before = await entryFor(tree, key, match, ctx)
