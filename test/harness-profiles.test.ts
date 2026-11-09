@@ -28,12 +28,12 @@ test('every adapter says whether it supports profiles', () => {
   assert.deepEqual(Object.fromEntries(listAdapters().map((adapter) => [adapter.id, adapter.profiles])), { claude: true, opencode: false, codex: true, gemini: false, antigravity: false })
 })
 
-test('harnessEnv keeps the base without a profile and applies envFor with one', async () => {
+test('harnessEnv uses builtin semantics without a profile and applies envFor with one', async () => {
   const ctx = contextFor(baseEnv())
   const { profile } = await addProfile('work', ctx)
-  const plain = await harnessEnv('claude', null, { ...baseEnv(), CLAUDECODE: '1', CLAUDE_CONFIG_DIR: '/kept' })
+  const plain = await harnessEnv('claude', null, { ...baseEnv(), CLAUDECODE: '1', CLAUDE_CONFIG_DIR: '/inherited' })
   assert.equal(plain['CLAUDECODE'], undefined)
-  assert.equal(plain['CLAUDE_CONFIG_DIR'], '/kept')
+  assert.equal(plain['CLAUDE_CONFIG_DIR'], undefined)
   const env = await harnessEnv('claude', 'work', { ...baseEnv(), ANTHROPIC_API_KEY: 'x', BITA_CHILD: '1' })
   assert.equal(env['CLAUDE_CONFIG_DIR'], profile.claude)
   assert.equal(env['ANTHROPIC_API_KEY'], undefined)

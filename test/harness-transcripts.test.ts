@@ -1,6 +1,6 @@
 import './isolate.ts'
 import { strict as assert } from 'node:assert'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -10,10 +10,18 @@ import type { HarnessId, TranscriptRef } from '../src/harness/types.ts'
 import { createFakeBin, readFakeBinCalls } from './fake-bin.ts'
 
 const fixtures = join(import.meta.dirname, 'fixtures', 'harness')
-const root = mkdtempSync(join(tmpdir(), 'kit-transcripts-'))
+const root = realpathSync(mkdtempSync(join(tmpdir(), 'kit-transcripts-')))
 process.env['HOME'] = root
 process.env['KIT_NO_EVENTS'] = '1'
 after(() => rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }))
+
+function stage(home: string, sub: string, fixture: string, name: string = fixture): string {
+  const dir = join(home, sub)
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, name)
+  copyFileSync(join(fixtures, fixture), file)
+  return file
+}
 
 function ref(harness: HarnessId, overrides: Partial<TranscriptRef> = {}): TranscriptRef {
   return {
@@ -29,7 +37,8 @@ function ref(harness: HarnessId, overrides: Partial<TranscriptRef> = {}): Transc
 }
 
 test('claude keeps only user and assistant text and drops meta, sidechains, tools and commands', async () => {
-  const turns = await getAdapter('claude').extractTranscript(ref('claude', { transcriptPath: join(fixtures, 'claude-session.jsonl') }))
+  const file = stage(join(root, '.claude'), join('projects', 'fixture'), 'claude-session.jsonl')
+  const turns = await getAdapter('claude').extractTranscript(ref('claude', { transcriptPath: file }))
   assert.deepEqual(turns, [
     { role: 'user', text: 'Agrega un comando para exportar entradas a CSV' },
     { role: 'assistant', text: 'Voy a revisar el router.\n\nListo: agregué `bita export --csv`.' },
@@ -38,17 +47,21 @@ test('claude keeps only user and assistant text and drops meta, sidechains, tool
   ])
 })
 
-test('claude locates the transcript from the session id under CLAUDE_CONFIG_DIR', async () => {
-  const configDir = join(root, 'claude-config')
-  process.env['CLAUDE_CONFIG_DIR'] = configDir
+test('claude locates the transcript from the session id under the default home and ignores an inherited CLAUDE_CONFIG_DIR', async () => {
+  process.env['CLAUDE_CONFIG_DIR'] = join(root, 'inherited-claude')
   try {
     const cwd = '/Users/me/dev/bita-cli/.claude/worktrees/x'
-    const dir = claudeProjectDir(cwd)
-    assert.equal(dir, join(configDir, 'projects', '-Users-me-dev-bita-cli--claude-worktrees-x'))
+    const configDir = join(root, 'claude-config')
+    assert.equal(claudeProjectDir(cwd, { CLAUDE_CONFIG_DIR: configDir }), join(configDir, 'projects', '-Users-me-dev-bita-cli--claude-worktrees-x'))
+    const dir = claudeProjectDir(cwd, { HOME: root })
     mkdirSync(dir, { recursive: true })
     copyFileSync(join(fixtures, 'claude-session.jsonl'), join(dir, 'sess-1.jsonl'))
+    const inherited = claudeProjectDir(cwd)
+    mkdirSync(inherited, { recursive: true })
+    copyFileSync(join(fixtures, 'claude-session.jsonl'), join(inherited, 'sess-2.jsonl'))
     const turns = await getAdapter('claude').extractTranscript(ref('claude', { cwd, sessionId: 'sess-1' }))
     assert.equal(turns.length, 4)
+    assert.deepEqual(await getAdapter('claude').extractTranscript(ref('claude', { cwd, sessionId: 'sess-2' })), [])
     assert.deepEqual(await getAdapter('claude').extractTranscript(ref('claude', { cwd, sessionId: 'missing' })), [])
     assert.deepEqual(await getAdapter('claude').extractTranscript(ref('claude', { cwd })), [])
   } finally {
@@ -56,19 +69,47 @@ test('claude locates the transcript from the session id under CLAUDE_CONFIG_DIR'
   }
 })
 
+test('claude and codex only read transcripts that resolve inside projects/ and sessions/ of the home', async () => {
+  const outside = stage(root, 'outside', 'claude-session.jsonl')
+  const outsideRollout = stage(root, 'outside', 'codex-rollout.jsonl')
+  const projects = join(root, '.claude', 'projects')
+  mkdirSync(join(projects, 'p'), { recursive: true })
+  symlinkSync(outside, join(projects, 'p', 'escape.jsonl'))
+  const sessions = join(root, '.codex', 'sessions')
+  mkdirSync(sessions, { recursive: true })
+  symlinkSync(outsideRollout, join(sessions, 'rollout-escape-abc.jsonl'))
+  const claude = getAdapter('claude')
+  const codex = getAdapter('codex')
+  assert.deepEqual(await claude.extractTranscript(ref('claude', { transcriptPath: outside })), [])
+  assert.deepEqual(await claude.extractTranscript(ref('claude', { transcriptPath: join(projects, 'p', 'escape.jsonl') })), [])
+  assert.deepEqual(await claude.extractTranscript(ref('claude', { transcriptPath: join(projects, '..', '..', 'outside', 'claude-session.jsonl') })), [])
+  assert.deepEqual(await claude.extractTranscript(ref('claude', { transcriptPath: projects })), [])
+  assert.deepEqual(await codex.extractTranscript(ref('codex', { transcriptPath: outsideRollout })), [])
+  assert.deepEqual(await codex.extractTranscript(ref('codex', { transcriptPath: join(sessions, 'rollout-escape-abc.jsonl') })), [])
+  assert.deepEqual(await codex.extractTranscript(ref('codex', { sessionId: 'abc' })), [])
+  const cwd = '/work/escape'
+  const dir = claudeProjectDir(cwd, { HOME: root })
+  mkdirSync(dir, { recursive: true })
+  copyFileSync(join(fixtures, 'claude-session.jsonl'), join(root, '.claude', 'evil.jsonl'))
+  for (const sessionId of ['../../evil', '..', 'a/b', 'a b', 'x.jsonl']) {
+    assert.deepEqual(await claude.extractTranscript(ref('claude', { cwd, sessionId })), [], sessionId)
+    assert.deepEqual(await codex.extractTranscript(ref('codex', { sessionId })), [], sessionId)
+  }
+})
+
 test('codex reads response messages and drops developer and injected context', async () => {
-  const turns = await getAdapter('codex').extractTranscript(ref('codex', { transcriptPath: join(fixtures, 'codex-rollout.jsonl') }))
+  const file = stage(join(root, '.codex'), join('sessions', 'fixture'), 'codex-rollout.jsonl')
+  const turns = await getAdapter('codex').extractTranscript(ref('codex', { transcriptPath: file }))
   assert.deepEqual(turns, [
     { role: 'user', text: 'Corrige el cálculo de horas extra' },
     { role: 'assistant', text: 'Corregí el redondeo en overtime.ts.' },
   ])
 })
 
-test('codex locates rollouts by session id and by cwd and time window under CODEX_HOME', async () => {
-  const codexHome = join(root, 'codex-home')
-  const day = join(codexHome, 'sessions', '2026', '10', '20')
+test('codex locates rollouts by session id and by cwd and time window under the default home, ignoring an inherited CODEX_HOME', async () => {
+  const day = join(root, '.codex', 'sessions', '2026', '10', '20')
   mkdirSync(day, { recursive: true })
-  process.env['CODEX_HOME'] = codexHome
+  process.env['CODEX_HOME'] = join(root, 'inherited-codex')
   try {
     const sessionId = '019a0000-0000-7000-8000-000000000001'
     const fixture = readFileSync(join(fixtures, 'codex-rollout.jsonl'), 'utf8')
