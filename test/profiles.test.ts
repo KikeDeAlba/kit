@@ -204,10 +204,19 @@ test('removeProfile refuses the builtin and the default, unmaps dirs and purges 
   await assert.rejects(removeProfile('work', {}, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_IS_DEFAULT')
   await setDefaultProfile('default', ctx)
   const removed = await removeProfile('work', { purge: true }, ctx)
-  assert.deepEqual(removed, { removed: true, purged: true, unmapped: [repo], logoutRequired: true })
+  assert.deepEqual(removed, { removed: true, purged: true, unmapped: [repo], logoutRequired: ctx.platform === 'darwin' })
   assert.equal(existsSync(profileHomes('work', ctx).root), false)
   assert.deepEqual((await listProfiles(ctx)).dirs, [])
   await assert.rejects(removeProfile('work', {}, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_NOT_FOUND')
+})
+
+test('logoutRequired is only reported on macOS, where the Keychain keeps the login', async (t) => {
+  for (const platform of ['darwin', 'linux'] as const) {
+    const base = await home(t)
+    const ctx = platformContext({ platform, home: base.home, env: base.env })
+    await addProfile('work', ctx)
+    assert.equal((await removeProfile('work', { purge: true }, ctx)).logoutRequired, platform === 'darwin', platform)
+  }
 })
 
 test('removeProfile keeps the directory without purge', async (t) => {

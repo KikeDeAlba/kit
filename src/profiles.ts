@@ -46,6 +46,7 @@ export type ProfileErrorCode =
   | 'PROFILE_IS_DEFAULT'
   | 'PROFILE_UNSUPPORTED_HARNESS'
   | 'PROFILE_HOME_SHARED'
+  | 'PROFILE_HOME_CONFLICT'
   | 'SHARED_COPY_INVALID'
 
 export class ProfileError extends Error {
@@ -114,23 +115,41 @@ function invalid(file: string, problem: string): ProfileError {
 function homeKey(dir: string, ctx: PlatformContext): string {
   const p = pathApi(ctx)
   const normalized = p.normalize(dir).replace(/[\\/]+$/, '') || p.sep
-  return ctx.platform === 'win32' ? normalized.toLowerCase() : normalized
+  return ctx.platform === 'win32' || ctx.platform === 'darwin' ? normalized.toLowerCase() : normalized
 }
 
-function checkDistinctHomes(profiles: Record<string, Omit<Profile, 'name'>>, ctx: PlatformContext, file: string): void {
+export interface ProfileHomeConflict {
+  harness: ProfileHarness
+  home: string
+  conflictsWith: string
+}
+
+function homeOwners(profiles: Record<string, Omit<Profile, 'name'>>, skip: string, ctx: PlatformContext, key: (dir: string) => string): Map<string, string> {
   const shared = sharedHomes(ctx)
   const owners = new Map<string, string>()
-  for (const harness of PROFILE_HARNESSES) owners.set(homeKey(shared[harness], ctx), `the shared ${harness} home`)
-  for (const [name, entry] of Object.entries(profiles)) {
+  for (const harness of PROFILE_HARNESSES) owners.set(key(shared[harness]), `the shared ${harness} home`)
+  for (const [other, entry] of Object.entries(profiles)) {
+    if (other === skip) continue
     for (const harness of PROFILE_HARNESSES) {
       const dir = entry[harness]
-      if (dir === null) continue
-      const key = homeKey(dir, ctx)
-      const owner = owners.get(key)
-      if (owner !== undefined) throw invalid(file, `profile "${name}" ${harness} directory ${dir} is already used by ${owner}`)
-      owners.set(key, `profile "${name}" (${harness})`)
+      if (dir !== null && !owners.has(key(dir))) owners.set(key(dir), `profile "${other}" (${harness})`)
     }
   }
+  return owners
+}
+
+function conflictsOf(name: string, entry: Omit<Profile, 'name'>, owners: Map<string, string>, key: (dir: string) => string): ProfileHomeConflict[] {
+  const conflicts: ProfileHomeConflict[] = []
+  const own = new Map<string, ProfileHarness>()
+  for (const harness of PROFILE_HARNESSES) {
+    const dir = entry[harness]
+    if (dir === null) continue
+    const k = key(dir)
+    const owner = owners.get(k) ?? (own.has(k) ? `profile "${name}" (${own.get(k)})` : undefined)
+    if (owner !== undefined) conflicts.push({ harness, home: dir, conflictsWith: owner })
+    own.set(k, harness)
+  }
+  return conflicts
 }
 
 export function parseProfiles(raw: unknown, ctx: PlatformContext = platformContext(), file: string = profilesPath(ctx)): ProfilesFile {
@@ -161,7 +180,6 @@ export function parseProfiles(raw: unknown, ctx: PlatformContext = platformConte
     profiles[name] = { builtin: false, claude: claudeHome, codex: codexHome, createdAt }
   }
   if (builtins !== 1) throw invalid(file, `exactly one profile must be builtin, found ${builtins}`)
-  checkDistinctHomes(profiles, ctx, file)
   const fallback = raw['default']
   if (typeof fallback !== 'string' || !Object.hasOwn(profiles, fallback)) throw invalid(file, 'default must name an existing profile')
   const dirs: DirMapping[] = []
@@ -363,6 +381,9 @@ export async function addProfile(name: string, ctx: PlatformContext = platformCo
     }
     const homes = profileHomes(name, ctx)
     const profile: Profile = { name, builtin: false, claude: homes.claude, codex: homes.codex, createdAt: new Date().toISOString() }
+    const key = (dir: string) => homeKey(dir, ctx)
+    const [conflict] = conflictsOf(name, profile, homeOwners(data.profiles, name, ctx, key), key)
+    if (conflict) throw new ProfileError('PROFILE_HOME_CONFLICT', `profile "${name}" ${conflict.harness} directory ${conflict.home} is already used by ${conflict.conflictsWith}`)
     await ensureProfileDirs(profile, ctx)
     data.profiles[name] = { builtin: false, claude: profile.claude, codex: profile.codex, createdAt: profile.createdAt }
     return { result: { profile, created: true }, write: true }
@@ -405,7 +426,7 @@ export async function removeProfile(
     await rm(profileHomes(name, ctx).root, { recursive: true, force: true })
     purged = true
   }
-  return { removed: true, purged, unmapped, logoutRequired: purged && profile.claude !== null }
+  return { removed: true, purged, unmapped, logoutRequired: purged && profile.claude !== null && ctx.platform === 'darwin' }
 }
 
 export async function setDefaultProfile(name: string, ctx: PlatformContext = platformContext()): Promise<void> {
@@ -464,9 +485,15 @@ export const SHARED_LINKS: readonly SharedLinkSpec[] = [
 export const SHARED_COPIES: readonly SharedLinkSpec[] = [{ harness: 'claude', name: 'settings.json', kind: 'file', strategy: 'copy' }]
 
 export const SHARED_COPY_MARKER = '.den-shared.json'
-export const CLAUDE_SETTINGS_SECRET_KEYS: readonly string[] = ['apiKeyHelper', 'awsCredentialExport', 'awsAuthRefresh', 'otelHeadersHelper']
+export const CLAUDE_SETTINGS_SECRET_KEYS: readonly string[] = ['apiKeyHelper', 'awsCredentialExport', 'awsAuthRefresh', 'gcpAuthRefresh', 'otelHeadersHelper']
+export const CLAUDE_SETTINGS_ENV_DROPPED: readonly string[] = [PROFILE_HOME_ENV.claude, PROFILE_HOME_ENV.codex, PROFILE_ENV]
 
-export type SharedLinkState = 'linked' | 'copied' | 'missing' | 'replaced' | 'foreign' | 'generated' | 'stale' | 'drifted'
+function isDroppedSettingsEnv(name: string): boolean {
+  const upper = name.toUpperCase()
+  return isProfileSecretEnv(name) || CLAUDE_SETTINGS_ENV_DROPPED.includes(upper) || /^OTEL_.*HEADERS/.test(upper)
+}
+
+export type SharedLinkState = 'linked' | 'copied' | 'missing' | 'replaced' | 'foreign' | 'generated' | 'stale' | 'drifted' | 'invalid-shared' | 'home-conflict'
 
 export const HEALTHY_LINK_STATES: readonly SharedLinkState[] = ['linked', 'copied', 'generated']
 
@@ -488,11 +515,12 @@ export function sharedHomes(ctx: PlatformContext = platformContext()): Record<Pr
 
 export function filterSharedClaudeSettings(settings: Record<string, unknown>): Record<string, unknown> {
   const filtered: Record<string, unknown> = {}
+  const secretKeys = new Set(CLAUDE_SETTINGS_SECRET_KEYS.map((key) => key.toLowerCase()))
   for (const [key, value] of Object.entries(settings)) {
-    if (CLAUDE_SETTINGS_SECRET_KEYS.includes(key)) continue
-    if (key === 'env' && isRecord(value)) {
+    if (secretKeys.has(key.toLowerCase())) continue
+    if (key.toLowerCase() === 'env' && isRecord(value)) {
       const env: Record<string, unknown> = {}
-      for (const [name, entry] of Object.entries(value)) if (!isProfileSecretEnv(name)) env[name] = entry
+      for (const [name, entry] of Object.entries(value)) if (!isDroppedSettingsEnv(name)) env[name] = entry
       filtered[key] = env
       continue
     }
@@ -634,15 +662,38 @@ async function syncCopies(profile: Profile, ctx: PlatformContext, repair: boolea
   return repairs
 }
 
+export async function profileHomeConflicts(name: string, ctx: PlatformContext = platformContext()): Promise<ProfileHomeConflict[]> {
+  const data = await readProfiles(ctx)
+  const profile = requireProfile(data, name)
+  if (profile.builtin) return []
+  const resolved = new Map<string, string>()
+  for (const dir of [...Object.values(sharedHomes(ctx)), ...Object.values(data.profiles).flatMap((entry) => [entry.claude, entry.codex])]) {
+    if (dir !== null && !resolved.has(dir)) resolved.set(dir, homeKey(await realOrResolved(dir), ctx))
+  }
+  const key = (dir: string) => resolved.get(dir) ?? homeKey(dir, ctx)
+  return conflictsOf(name, profile, homeOwners(data.profiles, name, ctx, key), key)
+}
+
 export async function inspectSharedLinks(name: string, ctx: PlatformContext = platformContext()): Promise<SharedLink[]> {
   const profile = await getProfile(name, ctx)
-  await assertSeparateHomes(profile, ctx)
+  const conflicted = new Set((await profileHomeConflicts(name, ctx)).map((conflict) => conflict.harness))
   const links: SharedLink[] = []
   for (const entry of sharedEntries(profile, SHARED_LINKS, ctx)) {
-    links.push({ ...entry.spec, path: entry.path, target: entry.target, state: await linkState(entry.spec, entry.path, entry.target, ctx) })
+    const state = conflicted.has(entry.spec.harness) ? 'home-conflict' : await linkState(entry.spec, entry.path, entry.target, ctx)
+    links.push({ ...entry.spec, path: entry.path, target: entry.target, state })
   }
   for (const entry of sharedEntries(profile, SHARED_COPIES, ctx)) {
-    links.push({ ...entry.spec, path: entry.path, target: entry.target, state: await copyState(entry, await renderSharedCopy(entry)) })
+    let state: SharedLinkState
+    if (conflicted.has(entry.spec.harness)) state = 'home-conflict'
+    else {
+      try {
+        state = await copyState(entry, await renderSharedCopy(entry))
+      } catch (error) {
+        if (!(error instanceof ProfileError) || error.code !== 'SHARED_COPY_INVALID') throw error
+        state = 'invalid-shared'
+      }
+    }
+    links.push({ ...entry.spec, path: entry.path, target: entry.target, state })
   }
   return links
 }
@@ -696,6 +747,7 @@ export async function syncSharedCopies(name: string, ctx: PlatformContext = plat
 export async function repairSharedLinks(name: string, ctx: PlatformContext = platformContext()): Promise<SharedLinkRepair[]> {
   const profile = await getProfile(name, ctx)
   await assertSeparateHomes(profile, ctx)
+  for (const entry of sharedEntries(profile, SHARED_COPIES, ctx)) await renderSharedCopy(entry)
   await ensureProfileDirs(profile, ctx)
   const repairs: SharedLinkRepair[] = []
   for (const { spec, path: linkName, target } of sharedEntries(profile, SHARED_LINKS, ctx)) {

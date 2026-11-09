@@ -22,6 +22,8 @@ import {
   resolveProfile,
   syncSharedCopies,
   filterSharedClaudeSettings,
+  profileHomeConflicts,
+  removeProfile,
   serializeProfiles,
   tildePath,
   type Profile,
@@ -597,7 +599,7 @@ test('relative profile directories and a relative KIT_CONFIG_DIR are not accepte
   assert.equal(profilesPath(platformContext({ platform: 'linux', home: '/h', env: { KIT_CONFIG_DIR: 'relative/cfg' } })), '/h/.config/kikedealba/profiles.json')
 })
 
-test('a profile home that resolves to the shared home makes inspect, sync and repair refuse without moving anything', { skip: posixOnly }, async (t) => {
+test('a profile home that resolves to the shared home is reported by inspect and makes sync and repair refuse without moving anything', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   const { profile } = await addProfile('work', ctx)
   const shared = path.join(ctx.home, '.claude')
@@ -606,8 +608,11 @@ test('a profile home that resolves to the shared home makes inspect, sync and re
   await writeFile(path.join(shared, 'settings.json'), '{"model":"opus","apiKeyHelper":"/bin/key"}')
   await rm(profile.claude as string, { recursive: true })
   await symlink(shared, profile.claude as string)
+  const inspected = await inspectSharedLinks('work', ctx)
+  assert.ok(inspected.filter((link) => link.harness === 'claude').every((link) => link.state === 'home-conflict'), JSON.stringify(inspected))
+  assert.ok(inspected.filter((link) => link.harness === 'codex').every((link) => link.state !== 'home-conflict'))
+  assert.deepEqual((await profileHomeConflicts('work', ctx)).map((conflict) => [conflict.harness, conflict.conflictsWith]), [['claude', 'the shared claude home']])
   const refused = (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_HOME_SHARED'
-  await assert.rejects(inspectSharedLinks('work', ctx), refused)
   await assert.rejects(syncSharedCopies('work', ctx), refused)
   await assert.rejects(repairSharedLinks('work', ctx), refused)
   assert.equal(await readFile(path.join(shared, 'CLAUDE.md'), 'utf8'), 'shared rules\n')
@@ -619,13 +624,28 @@ test('filterSharedClaudeSettings drops credential helpers and agent account vari
   const filtered = filterSharedClaudeSettings({
     model: 'opus',
     apiKeyHelper: '/bin/key',
+    APIKEYHELPER: '/bin/key2',
     awsCredentialExport: '/bin/aws',
     awsAuthRefresh: 'aws sso login',
+    gcpAuthRefresh: 'gcloud auth login',
     otelHeadersHelper: '/bin/otel',
     permissions: { allow: ['Bash(ls)'] },
-    env: { ANTHROPIC_API_KEY: 'a', CLAUDE_CODE_USE_BEDROCK: '1', AWS_BEARER_TOKEN_BEDROCK: 'b', GITHUB_TOKEN: 'g', AWS_PROFILE: 'p', DISABLE_TELEMETRY: '1' },
+    env: {
+      ANTHROPIC_API_KEY: 'a',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      AWS_BEARER_TOKEN_BEDROCK: 'b',
+      OTEL_EXPORTER_OTLP_HEADERS: 'h',
+      otel_exporter_otlp_metrics_headers: 'h',
+      CLAUDE_CONFIG_DIR: '/x',
+      codex_home: '/y',
+      DEN_PROFILE: 'z',
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://o',
+      GITHUB_TOKEN: 'g',
+      AWS_PROFILE: 'p',
+      DISABLE_TELEMETRY: '1',
+    },
   })
-  assert.deepEqual(filtered, { model: 'opus', permissions: { allow: ['Bash(ls)'] }, env: { GITHUB_TOKEN: 'g', AWS_PROFILE: 'p', DISABLE_TELEMETRY: '1' } })
+  assert.deepEqual(filtered, { model: 'opus', permissions: { allow: ['Bash(ls)'] }, env: { OTEL_EXPORTER_OTLP_ENDPOINT: 'http://o', GITHUB_TOKEN: 'g', AWS_PROFILE: 'p', DISABLE_TELEMETRY: '1' } })
 })
 
 test('the settings copy reports generated, stale and drifted; sync regenerates stale and missing copies but never a drifted one', { skip: posixOnly }, async (t) => {
@@ -672,25 +692,54 @@ test('an unreadable shared settings.json is reported instead of copied, and the 
   await addProfile('work', ctx)
   const shared = path.join(ctx.home, '.claude', 'settings.json')
   await mkdir(path.dirname(shared), { recursive: true })
+  const invalid = (error: unknown) => error instanceof ProfileError && error.code === 'SHARED_COPY_INVALID'
+  const claudeHome = (await getProfile('work', ctx)).claude as string
+  await writeFile(path.join(claudeHome, 'CLAUDE.md'), 'local\n')
   for (const content of ['{"a":', '[1]', 'null']) {
     await writeFile(shared, content)
-    await assert.rejects(syncSharedCopies('work', ctx), (error: unknown) => error instanceof ProfileError && error.code === 'SHARED_COPY_INVALID', content)
+    const states = Object.fromEntries((await inspectSharedLinks('work', ctx)).map((link) => [link.name, link.state]))
+    assert.equal(states['settings.json'], 'invalid-shared', content)
+    assert.equal(states['CLAUDE.md'], 'replaced', content)
+    await assert.rejects(syncSharedCopies('work', ctx), invalid, content)
+    await assert.rejects(repairSharedLinks('work', ctx), invalid, content)
   }
-  assert.equal(existsSync(path.join((await getProfile('work', ctx)).claude as string, 'settings.json')), false)
+  assert.equal(existsSync(path.join(claudeHome, 'settings.json')), false)
+  assert.equal(readFileSync(path.join(claudeHome, 'CLAUDE.md'), 'utf8'), 'local\n')
+  assert.deepEqual(backupsOf(path.join(claudeHome, 'CLAUDE.md')), [])
+  assert.equal(existsSync(path.join(ctx.home, '.claude', 'skills')), false)
   assert.deepEqual(await syncSharedCopies('default', ctx), [])
 })
 
-test('parseProfiles rejects profile homes that are a shared home or that two entries share', () => {
-  const ctx = platformContext({ platform: 'linux', home: '/h', env: {} })
-  const cases: Record<string, unknown>[] = [
-    { b: { claude: '~/.claude', codex: '/p/b/codex' } },
-    { b: { claude: '/h/.codex/', codex: '/p/b/codex' } },
-    { b: { claude: '/p/same', codex: '/p/same' } },
-    { b: { claude: '/p/b/claude', codex: '/p/b/codex' }, c: { claude: '/p/c/claude', codex: '/p/b/codex' } },
-    { b: { claude: '/p/b/claude', codex: '/p/b/codex' }, c: { claude: '/p/b/./claude', codex: '/p/c/codex' } },
-  ]
-  for (const extra of cases) {
-    assert.throws(() => parseProfiles({ version: 1, default: 'a', profiles: { a: { builtin: true }, ...extra } }, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILES_INVALID', JSON.stringify(extra))
-  }
-  assert.doesNotThrow(() => parseProfiles({ version: 1, default: 'a', profiles: { a: { builtin: true }, b: { claude: '/p/b/claude', codex: '/p/b/codex' }, c: { claude: '/p/c/claude', codex: '/p/c/codex' } } }, ctx))
+test('repeated or shared profile homes are read fine, reported by inspect, refused on add, and removal still works', { skip: posixOnly }, async (t) => {
+  const linux = platformContext({ platform: 'linux', home: '/h', env: {} })
+  const legacy = { b: { claude: '~/.claude', codex: '/p/b/codex' }, c: { claude: '/p/same', codex: '/p/same' }, d: { claude: '/p/d/claude', codex: '/p/b/codex' } }
+  assert.doesNotThrow(() => parseProfiles({ version: 1, default: 'a', profiles: { a: { builtin: true }, ...legacy } }, linux))
+
+  const ctx = await sandboxed(t)
+  const root = path.join(ctx.home, '.config', 'kikedealba')
+  const homes = profileHomes('fresh', ctx)
+  await mkdir(root, { recursive: true })
+  await writeFile(profilesPath(ctx), JSON.stringify({
+    version: 1,
+    default: 'personal',
+    profiles: {
+      personal: { builtin: true },
+      old: { claude: '~/.claude', codex: '~/.config/kikedealba/profiles/old/codex' },
+      twin: { claude: '~/x/same', codex: '~/x/same' },
+      squat: { claude: homes.claude, codex: path.join(ctx.home, 'squat', 'codex') },
+    },
+  }))
+  assert.deepEqual((await listProfiles(ctx)).profiles.map((profile) => profile.name), ['personal', 'old', 'twin', 'squat'])
+  assert.deepEqual((await profileHomeConflicts('old', ctx)).map((conflict) => [conflict.harness, conflict.conflictsWith]), [['claude', 'the shared claude home']])
+  assert.deepEqual((await profileHomeConflicts('twin', ctx)).map((conflict) => [conflict.harness, conflict.conflictsWith]), [['codex', 'profile "twin" (claude)']])
+  assert.deepEqual(await profileHomeConflicts('personal', ctx), [])
+  const old = Object.fromEntries((await inspectSharedLinks('old', ctx)).map((link) => [`${link.harness}/${link.name}`, link.state]))
+  assert.equal(old['claude/CLAUDE.md'], 'home-conflict')
+  assert.equal(old['claude/settings.json'], 'home-conflict')
+  assert.equal(old['codex/AGENTS.md'], 'missing')
+  await assert.rejects(addProfile('fresh', ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_HOME_CONFLICT')
+  assert.equal((await resolveProfile({}, ctx)).profile.name, 'personal')
+  await removeProfile('old', {}, ctx)
+  await removeProfile('twin', {}, ctx)
+  assert.equal((await addProfile('other', ctx)).created, true)
 })
