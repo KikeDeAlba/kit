@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { cp, lstat, mkdir, readFile, readlink, realpath, rename, rm, symlink, writeFile, chmod } from 'node:fs/promises'
 import path from 'node:path'
@@ -5,7 +6,7 @@ import { findAgentBinary } from './agents/binaries.ts'
 import { withFileLock, writeFileAtomic } from './atomic.ts'
 import { withoutHarnessSession } from './harness/env.ts'
 import type { HarnessId } from './harness/types.ts'
-import { kitConfigRoot, platformContext, run, type PlatformContext } from './platform.ts'
+import { ensureKitConfigRoot, kitConfigRoot, platformContext, run, type PlatformContext } from './platform.ts'
 
 export const PROFILES_VERSION = 1
 export const PROFILE_ENV = 'DEN_PROFILE'
@@ -14,8 +15,8 @@ export type ProfileHarness = (typeof PROFILE_HARNESSES)[number]
 export const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
 export const PROFILES_SCHEMA_URL = 'https://raw.githubusercontent.com/KikeDeAlba/kit/main/schemas/profiles.v1.json'
 export const PROFILE_HOME_ENV: Record<ProfileHarness, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME' }
-export const PROFILE_SECRET_ENV: readonly string[] = ['CLAUDE_CODE_OAUTH_TOKEN', 'CODEX_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']
-export const PROFILE_SECRET_ENV_PREFIXES: readonly string[] = ['ANTHROPIC_', 'OPENAI_', 'AWS_BEARER_', 'CLAUDE_CODE_USE_']
+export const PROFILE_SECRET_ENV: readonly string[] = ['AWS_BEARER_TOKEN_BEDROCK', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'CLOUD_ML_REGION']
+export const PROFILE_SECRET_ENV_PREFIXES: readonly string[] = ['ANTHROPIC_', 'OPENAI_', 'AZURE_OPENAI_', 'CLAUDE_CODE_USE_', 'CLAUDE_CODE_OAUTH_', 'CLAUDE_CODE_API_KEY', 'GOOGLE_GENAI_']
 
 export interface Profile {
   name: string
@@ -44,6 +45,8 @@ export type ProfileErrorCode =
   | 'PROFILE_BUILTIN'
   | 'PROFILE_IS_DEFAULT'
   | 'PROFILE_UNSUPPORTED_HARNESS'
+  | 'PROFILE_HOME_SHARED'
+  | 'SHARED_COPY_INVALID'
 
 export class ProfileError extends Error {
   readonly code: ProfileErrorCode
@@ -108,6 +111,28 @@ function invalid(file: string, problem: string): ProfileError {
   return new ProfileError('PROFILES_INVALID', `${file} is invalid: ${problem}`)
 }
 
+function homeKey(dir: string, ctx: PlatformContext): string {
+  const p = pathApi(ctx)
+  const normalized = p.normalize(dir).replace(/[\\/]+$/, '') || p.sep
+  return ctx.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+function checkDistinctHomes(profiles: Record<string, Omit<Profile, 'name'>>, ctx: PlatformContext, file: string): void {
+  const shared = sharedHomes(ctx)
+  const owners = new Map<string, string>()
+  for (const harness of PROFILE_HARNESSES) owners.set(homeKey(shared[harness], ctx), `the shared ${harness} home`)
+  for (const [name, entry] of Object.entries(profiles)) {
+    for (const harness of PROFILE_HARNESSES) {
+      const dir = entry[harness]
+      if (dir === null) continue
+      const key = homeKey(dir, ctx)
+      const owner = owners.get(key)
+      if (owner !== undefined) throw invalid(file, `profile "${name}" ${harness} directory ${dir} is already used by ${owner}`)
+      owners.set(key, `profile "${name}" (${harness})`)
+    }
+  }
+}
+
 export function parseProfiles(raw: unknown, ctx: PlatformContext = platformContext(), file: string = profilesPath(ctx)): ProfilesFile {
   if (!isRecord(raw)) throw invalid(file, 'not a JSON object')
   if (raw['version'] !== PROFILES_VERSION) throw invalid(file, `version must be ${PROFILES_VERSION}`)
@@ -136,6 +161,7 @@ export function parseProfiles(raw: unknown, ctx: PlatformContext = platformConte
     profiles[name] = { builtin: false, claude: claudeHome, codex: codexHome, createdAt }
   }
   if (builtins !== 1) throw invalid(file, `exactly one profile must be builtin, found ${builtins}`)
+  checkDistinctHomes(profiles, ctx, file)
   const fallback = raw['default']
   if (typeof fallback !== 'string' || !Object.hasOwn(profiles, fallback)) throw invalid(file, 'default must name an existing profile')
   const dirs: DirMapping[] = []
@@ -195,6 +221,7 @@ async function writeProfiles(data: ProfilesFile, ctx: PlatformContext): Promise<
 }
 
 async function mutateProfiles<T>(ctx: PlatformContext, change: (data: ProfilesFile) => Promise<{ result: T; write: boolean }>): Promise<T> {
+  await ensureKitConfigRoot(ctx)
   return withFileLock(profilesPath(ctx), async () => {
     const data = await readProfiles(ctx)
     const { result, write } = await change(data)
@@ -289,7 +316,7 @@ function deleteKey(env: NodeJS.ProcessEnv, name: string): void {
   for (const key of Object.keys(env)) if (key.toUpperCase() === name) delete env[key]
 }
 
-function isProfileSecret(key: string): boolean {
+export function isProfileSecretEnv(key: string): boolean {
   const upper = key.toUpperCase()
   return PROFILE_SECRET_ENV.includes(upper) || PROFILE_SECRET_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix))
 }
@@ -298,8 +325,8 @@ export function envFor(profile: Profile, harness: HarnessId | 'all', baseEnv: No
   const env = withoutHarnessSession(baseEnv)
   for (const name of Object.values(PROFILE_HOME_ENV)) deleteKey(env, name)
   deleteKey(env, PROFILE_ENV)
-  if (!profile.builtin) {
-    for (const key of Object.keys(env)) if (isProfileSecret(key)) delete env[key]
+  if (!profile.builtin && (harness === 'all' || profileSupports(harness))) {
+    for (const key of Object.keys(env)) if (isProfileSecretEnv(key)) delete env[key]
     if ((harness === 'claude' || harness === 'all') && profile.claude) env[PROFILE_HOME_ENV.claude] = profile.claude
     if ((harness === 'codex' || harness === 'all') && profile.codex) env[PROFILE_HOME_ENV.codex] = profile.codex
   }
@@ -363,22 +390,22 @@ export async function removeProfile(
   name: string,
   options: { purge?: boolean } = {},
   ctx: PlatformContext = platformContext(),
-): Promise<{ removed: boolean; purged: boolean; unmapped: string[] }> {
-  const unmapped = await mutateProfiles(ctx, async (data) => {
+): Promise<{ removed: boolean; purged: boolean; unmapped: string[]; logoutRequired: boolean }> {
+  const { dropped: unmapped, profile } = await mutateProfiles(ctx, async (data) => {
     const profile = requireProfile(data, name)
     if (profile.builtin) throw new ProfileError('PROFILE_BUILTIN', `profile "${name}" is the builtin profile and cannot be removed`)
     if (data.default === name) throw new ProfileError('PROFILE_IS_DEFAULT', `profile "${name}" is the default; choose another default first`)
     const dropped = data.dirs.filter((mapping) => mapping.profile === name).map((mapping) => mapping.path)
     data.dirs = data.dirs.filter((mapping) => mapping.profile !== name)
     delete data.profiles[name]
-    return { result: dropped, write: true }
+    return { result: { dropped, profile }, write: true }
   })
   let purged = false
   if (options.purge) {
     await rm(profileHomes(name, ctx).root, { recursive: true, force: true })
     purged = true
   }
-  return { removed: true, purged, unmapped }
+  return { removed: true, purged, unmapped, logoutRequired: purged && profile.claude !== null }
 }
 
 export async function setDefaultProfile(name: string, ctx: PlatformContext = platformContext()): Promise<void> {
@@ -417,25 +444,31 @@ export async function unmapDir(dir: string, ctx: PlatformContext = platformConte
   })
 }
 
+export type SharedEntryStrategy = 'link' | 'copy'
+
 export interface SharedLinkSpec {
   harness: ProfileHarness
   name: string
   kind: 'file' | 'dir'
+  strategy: SharedEntryStrategy
 }
 
 export const SHARED_LINKS: readonly SharedLinkSpec[] = [
-  { harness: 'claude', name: 'CLAUDE.md', kind: 'file' },
-  { harness: 'claude', name: 'settings.json', kind: 'file' },
-  { harness: 'claude', name: 'skills', kind: 'dir' },
-  { harness: 'claude', name: 'agents', kind: 'dir' },
-  { harness: 'claude', name: 'commands', kind: 'dir' },
-  { harness: 'codex', name: 'AGENTS.md', kind: 'file' },
-  { harness: 'codex', name: 'config.toml', kind: 'file' },
+  { harness: 'claude', name: 'CLAUDE.md', kind: 'file', strategy: 'link' },
+  { harness: 'claude', name: 'skills', kind: 'dir', strategy: 'link' },
+  { harness: 'claude', name: 'agents', kind: 'dir', strategy: 'link' },
+  { harness: 'claude', name: 'commands', kind: 'dir', strategy: 'link' },
+  { harness: 'codex', name: 'AGENTS.md', kind: 'file', strategy: 'link' },
 ]
 
-export type SharedLinkState = 'linked' | 'copied' | 'missing' | 'replaced' | 'foreign'
+export const SHARED_COPIES: readonly SharedLinkSpec[] = [{ harness: 'claude', name: 'settings.json', kind: 'file', strategy: 'copy' }]
 
-export const HEALTHY_LINK_STATES: readonly SharedLinkState[] = ['linked', 'copied']
+export const SHARED_COPY_MARKER = '.den-shared.json'
+export const CLAUDE_SETTINGS_SECRET_KEYS: readonly string[] = ['apiKeyHelper', 'awsCredentialExport', 'awsAuthRefresh', 'otelHeadersHelper']
+
+export type SharedLinkState = 'linked' | 'copied' | 'missing' | 'replaced' | 'foreign' | 'generated' | 'stale' | 'drifted'
+
+export const HEALTHY_LINK_STATES: readonly SharedLinkState[] = ['linked', 'copied', 'generated']
 
 export interface SharedLink extends SharedLinkSpec {
   path: string
@@ -453,6 +486,21 @@ export function sharedHomes(ctx: PlatformContext = platformContext()): Record<Pr
   return { claude: p.join(ctx.home, '.claude'), codex: p.join(ctx.home, '.codex') }
 }
 
+export function filterSharedClaudeSettings(settings: Record<string, unknown>): Record<string, unknown> {
+  const filtered: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(settings)) {
+    if (CLAUDE_SETTINGS_SECRET_KEYS.includes(key)) continue
+    if (key === 'env' && isRecord(value)) {
+      const env: Record<string, unknown> = {}
+      for (const [name, entry] of Object.entries(value)) if (!isProfileSecretEnv(name)) env[name] = entry
+      filtered[key] = env
+      continue
+    }
+    filtered[key] = value
+  }
+  return filtered
+}
+
 async function linkState(spec: SharedLinkSpec, linkName: string, target: string, ctx: PlatformContext): Promise<SharedLinkState> {
   const [linkDir, targetDir] = await Promise.all([realOrResolved(path.dirname(linkName)), realOrResolved(path.dirname(target))])
   if (linkDir === targetDir && path.basename(linkName) === path.basename(target)) return 'linked'
@@ -468,21 +516,133 @@ async function linkState(spec: SharedLinkSpec, linkName: string, target: string,
   return left === right ? 'linked' : 'foreign'
 }
 
-function linkSpecs(profile: Profile, ctx: PlatformContext): { spec: SharedLinkSpec; path: string; target: string }[] {
+interface SharedEntry {
+  spec: SharedLinkSpec
+  path: string
+  target: string
+}
+
+function sharedEntries(profile: Profile, specs: readonly SharedLinkSpec[], ctx: PlatformContext): SharedEntry[] {
   if (profile.builtin) return []
   const shared = sharedHomes(ctx)
-  return SHARED_LINKS.flatMap((spec) => {
+  return specs.flatMap((spec) => {
     const home = profile[spec.harness]
     if (!home) return []
     return [{ spec, path: path.join(home, spec.name), target: path.join(shared[spec.harness], spec.name) }]
   })
 }
 
+async function assertSeparateHomes(profile: Profile, ctx: PlatformContext): Promise<void> {
+  if (profile.builtin) return
+  const shared = sharedHomes(ctx)
+  for (const harness of PROFILE_HARNESSES) {
+    const home = profile[harness]
+    if (home === null) continue
+    const [own, common] = await Promise.all([realOrResolved(home), realOrResolved(shared[harness])])
+    if (own === common) throw new ProfileError('PROFILE_HOME_SHARED', `profile "${profile.name}" ${harness} home ${home} resolves to the shared home ${shared[harness]}`)
+  }
+}
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+
+interface CopyRecord {
+  sha256: string
+  source: string
+  generatedAt: string
+}
+
+function markerPath(entry: SharedEntry): string {
+  return path.join(path.dirname(entry.path), SHARED_COPY_MARKER)
+}
+
+async function readMarker(file: string): Promise<Record<string, CopyRecord>> {
+  const records = emptyRecord<CopyRecord>()
+  let raw: unknown
+  try {
+    raw = JSON.parse(await readFile(file, 'utf8'))
+  } catch {
+    return records
+  }
+  if (!isRecord(raw) || !isRecord(raw['files'])) return records
+  for (const [name, value] of Object.entries(raw['files'])) {
+    if (isRecord(value) && typeof value['sha256'] === 'string') {
+      records[name] = { sha256: value['sha256'], source: typeof value['source'] === 'string' ? value['source'] : '', generatedAt: typeof value['generatedAt'] === 'string' ? value['generatedAt'] : '' }
+    }
+  }
+  return records
+}
+
+async function renderSharedCopy(entry: SharedEntry): Promise<string> {
+  let text: string
+  try {
+    text = await readFile(entry.target, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '{}\n'
+    throw new ProfileError('SHARED_COPY_INVALID', `cannot read ${entry.target}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    throw new ProfileError('SHARED_COPY_INVALID', `${entry.target} is not valid JSON (${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (!isRecord(parsed)) throw new ProfileError('SHARED_COPY_INVALID', `${entry.target} is not a JSON object`)
+  return `${JSON.stringify(filterSharedClaudeSettings(parsed), null, 2)}\n`
+}
+
+async function copyState(entry: SharedEntry, rendered: string): Promise<SharedLinkState> {
+  const info = await lstat(entry.path).catch(() => null)
+  if (!info) return 'missing'
+  if (info.isSymbolicLink()) return 'foreign'
+  if (!info.isFile()) return 'replaced'
+  const record = (await readMarker(markerPath(entry)))[entry.spec.name]
+  if (!record) return 'drifted'
+  const current = await readFile(entry.path, 'utf8').catch(() => null)
+  if (current === null || sha256(current) !== record.sha256) return 'drifted'
+  return sha256(rendered) === record.sha256 ? 'generated' : 'stale'
+}
+
+async function writeCopy(entry: SharedEntry, rendered: string): Promise<void> {
+  const info = await lstat(entry.path).catch(() => null)
+  if (info?.isSymbolicLink()) await rm(entry.path, { force: true })
+  await mkdir(path.dirname(entry.path), { recursive: true, mode: 0o700 })
+  await writeFileAtomic(entry.path, rendered, { mode: 0o600 })
+  const marker = markerPath(entry)
+  const records = await readMarker(marker)
+  records[entry.spec.name] = { sha256: sha256(rendered), source: entry.target, generatedAt: new Date().toISOString() }
+  await writeFileAtomic(marker, `${JSON.stringify({ version: 1, files: records }, null, 2)}\n`, { mode: 0o600 })
+}
+
+async function syncCopies(profile: Profile, ctx: PlatformContext, repair: boolean): Promise<SharedLinkRepair[]> {
+  const repairs: SharedLinkRepair[] = []
+  for (const entry of sharedEntries(profile, SHARED_COPIES, ctx)) {
+    const result = await withFileLock(markerPath(entry), async (): Promise<SharedLinkRepair> => {
+      const rendered = await renderSharedCopy(entry)
+      const previous = await copyState(entry, rendered)
+      let backup: string | null = null
+      const rewrite = previous === 'missing' || previous === 'stale' || previous === 'foreign' || (repair && (previous === 'drifted' || previous === 'replaced'))
+      if (rewrite) {
+        if (previous === 'drifted' || previous === 'replaced') backup = await moveAside(entry.path)
+        await writeCopy(entry, rendered)
+      }
+      return { ...entry.spec, path: entry.path, target: entry.target, state: await copyState(entry, rendered), previous, backup }
+    })
+    repairs.push(result)
+  }
+  return repairs
+}
+
 export async function inspectSharedLinks(name: string, ctx: PlatformContext = platformContext()): Promise<SharedLink[]> {
   const profile = await getProfile(name, ctx)
+  await assertSeparateHomes(profile, ctx)
   const links: SharedLink[] = []
-  for (const { spec, path: linkName, target } of linkSpecs(profile, ctx)) {
-    links.push({ ...spec, path: linkName, target, state: await linkState(spec, linkName, target, ctx) })
+  for (const entry of sharedEntries(profile, SHARED_LINKS, ctx)) {
+    links.push({ ...entry.spec, path: entry.path, target: entry.target, state: await linkState(entry.spec, entry.path, entry.target, ctx) })
+  }
+  for (const entry of sharedEntries(profile, SHARED_COPIES, ctx)) {
+    links.push({ ...entry.spec, path: entry.path, target: entry.target, state: await copyState(entry, await renderSharedCopy(entry)) })
   }
   return links
 }
@@ -494,7 +654,7 @@ async function ensureSharedTarget(spec: SharedLinkSpec, target: string): Promise
     return
   }
   await mkdir(path.dirname(target), { recursive: true })
-  await writeFile(target, spec.name.endsWith('.json') ? '{}\n' : '', { flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
+  await writeFile(target, '', { flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'EEXIST') throw error
   })
 }
@@ -526,11 +686,19 @@ async function placeLink(spec: SharedLinkSpec, target: string, linkName: string,
   await symlink(target, linkName)
 }
 
+export async function syncSharedCopies(name: string, ctx: PlatformContext = platformContext()): Promise<SharedLinkRepair[]> {
+  const profile = await getProfile(name, ctx)
+  await assertSeparateHomes(profile, ctx)
+  await ensureProfileDirs(profile, ctx)
+  return syncCopies(profile, ctx, false)
+}
+
 export async function repairSharedLinks(name: string, ctx: PlatformContext = platformContext()): Promise<SharedLinkRepair[]> {
   const profile = await getProfile(name, ctx)
+  await assertSeparateHomes(profile, ctx)
   await ensureProfileDirs(profile, ctx)
   const repairs: SharedLinkRepair[] = []
-  for (const { spec, path: linkName, target } of linkSpecs(profile, ctx)) {
+  for (const { spec, path: linkName, target } of sharedEntries(profile, SHARED_LINKS, ctx)) {
     await ensureSharedTarget(spec, target)
     const previous = await linkState(spec, linkName, target, ctx)
     let backup: string | null = null
@@ -542,6 +710,7 @@ export async function repairSharedLinks(name: string, ctx: PlatformContext = pla
     }
     repairs.push({ ...spec, path: linkName, target, state: await linkState(spec, linkName, target, ctx), previous, backup })
   }
+  repairs.push(...(await syncCopies(profile, ctx, true)))
   return repairs
 }
 

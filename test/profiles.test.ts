@@ -86,11 +86,59 @@ test('envFor on a non-builtin profile drops tokens and sets the home of each har
   const gemini = envFor(work, 'gemini', inherited)
   assert.equal(gemini['CLAUDE_CONFIG_DIR'], undefined)
   assert.equal(gemini['CODEX_HOME'], undefined)
-  assert.equal(gemini['ANTHROPIC_API_KEY'], undefined)
-  const prefixed = envFor(work, 'gemini', { ANTHROPIC_BASE_URL: 'u', OPENAI_ORG: 'o', AWS_BEARER_TOKEN_BEDROCK: 'b', CLAUDE_CODE_USE_BEDROCK: '1', GEMINI_API_KEY: 'g', GOOGLE_API_KEY: 'k', CLAUDE_CODE_SSE_PORT: '1', AWS_REGION: 'r' })
-  assert.deepEqual(Object.keys(prefixed).sort(), ['AWS_REGION', 'CLAUDE_CODE_SSE_PORT', 'DEN_PROFILE'])
+  assert.equal(gemini['ANTHROPIC_API_KEY'], 'sk-ant')
+  const agentAccount = { ANTHROPIC_BASE_URL: 'u', OPENAI_ORG: 'o', AWS_BEARER_TOKEN_BEDROCK: 'b', CLAUDE_CODE_USE_BEDROCK: '1', GEMINI_API_KEY: 'g', GOOGLE_API_KEY: 'k', CLAUDE_CODE_SSE_PORT: '1', AWS_REGION: 'r' }
+  assert.deepEqual(Object.keys(envFor(work, 'claude', agentAccount)).sort(), ['AWS_REGION', 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CONFIG_DIR', 'DEN_PROFILE'])
+  assert.deepEqual(Object.keys(envFor(work, 'gemini', agentAccount)).sort(), [...Object.keys(agentAccount), 'DEN_PROFILE'].sort())
   assert.equal(gemini['CLAUDECODE'], undefined)
   assert.equal(gemini[PROFILE_ENV], 'work')
+})
+
+test('envFor on a non-builtin profile drops only the agent account credentials, and only for harnesses with profiles', () => {
+  const agentAccount: NodeJS.ProcessEnv = {
+    ANTHROPIC_API_KEY: 'a',
+    ANTHROPIC_VERTEX_PROJECT_ID: 'v',
+    OPENAI_API_KEY: 'b',
+    AZURE_OPENAI_API_KEY: 'c',
+    CLAUDE_CODE_USE_VERTEX: '1',
+    CLAUDE_CODE_OAUTH_TOKEN: 'd',
+    CLAUDE_CODE_OAUTH_REFRESH_TOKEN: 'e',
+    CLAUDE_CODE_API_KEY_HELPER_TTL_MS: '1',
+    AWS_BEARER_TOKEN_BEDROCK: 'f',
+    CODEX_API_KEY: 'g',
+    CODEX_ACCESS_TOKEN: 'h',
+    GEMINI_API_KEY: 'i',
+    GOOGLE_API_KEY: 'j',
+    GOOGLE_GENAI_USE_VERTEXAI: 'true',
+    CLOUD_ML_REGION: 'us-east5',
+  }
+  const workTools: NodeJS.ProcessEnv = {
+    AWS_ACCESS_KEY_ID: 'k',
+    AWS_SECRET_ACCESS_KEY: 'l',
+    AWS_SESSION_TOKEN: 'm',
+    AWS_PROFILE: 'n',
+    GITHUB_TOKEN: 'o',
+    NPM_TOKEN: 'p',
+    AZURE_CLIENT_SECRET: 'q',
+    GOOGLE_APPLICATION_CREDENTIALS: '/k.json',
+    DB_PASSWORD: 'r',
+    PATH: '/usr/bin',
+  }
+  const base = { ...agentAccount, ...workTools, CLAUDE_CONFIG_DIR: '/inherited', CODEX_HOME: '/inherited', DEN_PROFILE: 'other' }
+  for (const harness of ['claude', 'codex', 'all'] as const) {
+    const env = envFor(work, harness, base)
+    for (const key of Object.keys(agentAccount)) assert.equal(env[key], undefined, `${harness} ${key}`)
+    for (const [key, value] of Object.entries(workTools)) assert.equal(env[key], value, `${harness} ${key}`)
+    assert.equal(env[PROFILE_ENV], 'work')
+  }
+  for (const harness of ['gemini', 'opencode', 'antigravity'] as const) {
+    const env = envFor(work, harness, base)
+    for (const [key, value] of Object.entries({ ...agentAccount, ...workTools })) assert.equal(env[key], value, `${harness} ${key}`)
+    assert.equal(env['CLAUDE_CONFIG_DIR'], undefined)
+    assert.equal(env['CODEX_HOME'], undefined)
+    assert.equal(env[PROFILE_ENV], 'work')
+  }
+  assert.deepEqual(envFor(builtin, 'claude', base)['ANTHROPIC_API_KEY'], 'a')
 })
 
 test('profileSupports and profileHome only accept claude and codex', () => {
@@ -156,7 +204,7 @@ test('removeProfile refuses the builtin and the default, unmaps dirs and purges 
   await assert.rejects(removeProfile('work', {}, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_IS_DEFAULT')
   await setDefaultProfile('default', ctx)
   const removed = await removeProfile('work', { purge: true }, ctx)
-  assert.deepEqual(removed, { removed: true, purged: true, unmapped: [repo] })
+  assert.deepEqual(removed, { removed: true, purged: true, unmapped: [repo], logoutRequired: true })
   assert.equal(existsSync(profileHomes('work', ctx).root), false)
   assert.deepEqual((await listProfiles(ctx)).dirs, [])
   await assert.rejects(removeProfile('work', {}, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_NOT_FOUND')
@@ -165,7 +213,7 @@ test('removeProfile refuses the builtin and the default, unmaps dirs and purges 
 test('removeProfile keeps the directory without purge', async (t) => {
   const ctx = await home(t)
   await addProfile('work', ctx)
-  assert.deepEqual(await removeProfile('work', {}, ctx), { removed: true, purged: false, unmapped: [] })
+  assert.deepEqual(await removeProfile('work', {}, ctx), { removed: true, purged: false, unmapped: [], logoutRequired: false })
   assert.equal(existsSync(profileHomes('work', ctx).claude), true)
 })
 
@@ -252,18 +300,30 @@ test('shared links are created, detected when replaced and repaired with a backu
   await writeFile(path.join(shared, 'settings.json'), JSON.stringify({ model: 'opus' }))
 
   const before = await inspectSharedLinks('work', ctx)
-  assert.equal(before.length, 7)
+  assert.deepEqual(before.map((link) => `${link.harness}/${link.name}:${link.strategy}`), [
+    'claude/CLAUDE.md:link',
+    'claude/skills:link',
+    'claude/agents:link',
+    'claude/commands:link',
+    'codex/AGENTS.md:link',
+    'claude/settings.json:copy',
+  ])
   assert.ok(before.every((link) => link.state === 'missing'))
 
   const first = await repairSharedLinks('work', ctx)
-  assert.ok(first.every((link) => link.state === 'linked' && link.backup === null), JSON.stringify(first))
+  assert.ok(first.every((link) => link.state === (link.strategy === 'copy' ? 'generated' : 'linked') && link.backup === null), JSON.stringify(first))
   const profile = await getProfile('work', ctx)
   const claudeHome = profile.claude as string
-  assert.equal(readlinkSync(path.join(claudeHome, 'settings.json')), path.join(shared, 'settings.json'))
+  const settings = path.join(claudeHome, 'settings.json')
+  assert.equal(lstatSync(settings).isFile(), true)
+  assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), { model: 'opus' })
+  assert.equal(statSync(settings).mode & 0o777, 0o600)
+  assert.equal(existsSync(path.join(claudeHome, '.den-shared.json')), true)
   assert.equal(existsSync(path.join(shared, 'CLAUDE.md')), true)
   assert.equal(existsSync(path.join(ctx.home, '.codex', 'AGENTS.md')), true)
+  assert.equal(existsSync(path.join(profile.codex as string, 'config.toml')), false)
+  assert.equal(existsSync(path.join(ctx.home, '.codex', 'config.toml')), false)
 
-  const settings = path.join(claudeHome, 'settings.json')
   await writeFile(`${settings}.tmp`, JSON.stringify({ model: 'sonnet', theme: 'dark' }))
   await rename(`${settings}.tmp`, settings)
   const other = path.join(ctx.home, 'other.md')
@@ -272,13 +332,14 @@ test('shared links are created, detected when replaced and repaired with a backu
   await symlink(other, path.join(claudeHome, 'CLAUDE.md'))
 
   const inspected = Object.fromEntries((await inspectSharedLinks('work', ctx)).map((link) => [link.name, link.state]))
-  assert.deepEqual(inspected, { 'CLAUDE.md': 'foreign', 'settings.json': 'replaced', skills: 'linked', agents: 'linked', commands: 'linked', 'AGENTS.md': 'linked', 'config.toml': 'linked' })
+  assert.deepEqual(inspected, { 'CLAUDE.md': 'foreign', 'settings.json': 'drifted', skills: 'linked', agents: 'linked', commands: 'linked', 'AGENTS.md': 'linked' })
 
   const repaired = Object.fromEntries((await repairSharedLinks('work', ctx)).map((link) => [link.name, link]))
-  assert.ok(Object.values(repaired).every((link) => link.state === 'linked'))
-  assert.equal(repaired['settings.json']?.previous, 'replaced')
+  assert.ok(Object.values(repaired).every((link) => link.state === 'linked' || link.state === 'generated'))
+  assert.equal(repaired['settings.json']?.previous, 'drifted')
   assert.ok(repaired['settings.json']?.backup?.startsWith(`${settings}.backup-`))
   assert.deepEqual(JSON.parse(await readFile(path.join(shared, 'settings.json'), 'utf8')), { model: 'opus' })
+  assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), { model: 'opus' })
   assert.deepEqual(JSON.parse(await readFile(repaired['settings.json']?.backup as string, 'utf8')), { model: 'sonnet', theme: 'dark' })
   assert.equal(repaired['CLAUDE.md']?.previous, 'foreign')
   assert.equal(repaired['CLAUDE.md']?.backup, null)
