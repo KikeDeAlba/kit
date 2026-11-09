@@ -110,7 +110,7 @@ export const HEADLESS_ENV_ALLOWLIST: readonly string[] = [
   'KIT_HEADLESS',
 ]
 
-export const HEADLESS_ENV_PREFIXES: readonly string[] = ['LC_', 'XDG_', 'NVM_']
+export const HEADLESS_ENV_PREFIXES: readonly string[] = ['LC_', 'XDG_', 'NVM_', 'DEN_']
 
 export const HEADLESS_AGENT_ENV_PREFIXES: Record<HeadlessAgent, readonly string[]> = {
   claude: ['ANTHROPIC_', 'CLAUDE_'],

@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
+import { writeFileAtomic } from './atomic.ts'
 import path from 'node:path'
 import { configHome, platformContext, run, which, type PlatformContext } from './platform.ts'
 
@@ -187,10 +188,7 @@ export function fileStore(file: string): CredentialStore {
   }
   const save = async (values: Record<string, string>) => {
     await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
-    const temporary = `${file}.${process.pid}.tmp`
-    await writeFile(temporary, `${JSON.stringify(values, null, 2)}\n`, { mode: 0o600 })
-    await chmod(temporary, 0o600)
-    await rename(temporary, file)
+    await writeFileAtomic(file, `${JSON.stringify(values, null, 2)}\n`, { mode: 0o600 })
   }
   const key = (service: string, account: string) => `${service}\u0000${account}`
   return {
