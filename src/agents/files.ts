@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
-import { chmod, copyFile, cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, symlink } from 'node:fs/promises'
 import path from 'node:path'
+import { writeFileAtomic } from '../atomic.ts'
 import type { HookGroup, HookMap } from './types.ts'
 
 export async function linkPath(target: string, linkName: string, platform: NodeJS.Platform = process.platform): Promise<'installed' | 'present'> {
@@ -61,10 +62,7 @@ export async function readJsonFile(file: string): Promise<{ value: Record<string
 export async function writeJsonFile(file: string, value: unknown, backup: boolean, options: { mode?: number } = {}): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true })
   if (backup && existsSync(file)) await copyFile(file, `${file}.backup`)
-  const temporary = `${file}.${process.pid}.tmp`
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, options.mode === undefined ? {} : { mode: options.mode })
-  if (options.mode !== undefined) await chmod(temporary, options.mode)
-  await rename(temporary, file)
+  await writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`, options.mode === undefined ? {} : { mode: options.mode })
 }
 
 function commandsOf(group: HookGroup): string[] {

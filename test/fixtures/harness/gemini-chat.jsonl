@@ -1,0 +1,9 @@
+{"sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","projectHash":"abc123","startTime":"2026-10-20T10:00:00.000Z","lastUpdated":"2026-10-20T10:00:00.000Z","kind":"main"}
+{"id":"u1","timestamp":"2026-10-20T10:00:01.000Z","type":"user","content":[{"text":"Primer intento descartado"}]}
+{"id":"g1","timestamp":"2026-10-20T10:00:02.000Z","type":"gemini","content":"Respuesta descartada","thoughts":[],"tokens":null,"model":"gemini-3-flash"}
+{"$rewindTo":"u1"}
+{"id":"u2","timestamp":"2026-10-20T10:00:03.000Z","type":"user","content":[{"text":"Revisa el lector de transcripts"}]}
+{"id":"i1","timestamp":"2026-10-20T10:00:03.500Z","type":"info","content":"Approval mode changed"}
+{"id":"g2","timestamp":"2026-10-20T10:00:04.000Z","type":"gemini","content":"","thoughts":[],"tokens":null,"model":"gemini-3-flash"}
+{"$patch":{"id":"g2","content":[{"text":"pensando","thought":true},{"text":"El lector ya filtra los mensajes meta."}]}}
+{"$set":{"lastUpdated":"2026-10-20T10:00:05.000Z"}}

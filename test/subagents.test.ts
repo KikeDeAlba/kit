@@ -135,3 +135,17 @@ test('installs subagents and memory into every agent and uninstalls them', async
   assert.equal(await readFile(path.join(homes.codex, 'AGENTS.md'), 'utf8'), '')
   assert.ok(!existsSync(path.join(homes.gemini, 'extensions', 'demo')))
 })
+
+test('upsertMemoryBlock replaces an unterminated block up to the end of the file and warns once', () => {
+  const warnings: string[] = []
+  const broken = 'Intro\n\n<!-- kit:demo:begin -->\nold rule\nmore old text\n'
+  const fixed = upsertMemoryBlock(broken, 'demo', 'Rule A', (message) => warnings.push(message))
+  assert.equal(fixed, 'Intro\n\n<!-- kit:demo:begin -->\nRule A\n<!-- kit:demo:end -->\n')
+  assert.equal(fixed.split('kit:demo:begin').length, 2)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0] ?? '', /no matching/)
+  const again: string[] = []
+  assert.equal(upsertMemoryBlock(fixed, 'demo', 'Rule A', (message) => again.push(message)), fixed)
+  assert.deepEqual(again, [])
+  assert.equal(upsertMemoryBlock(broken, 'demo', 'Rule A'), fixed)
+})

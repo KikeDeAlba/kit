@@ -160,11 +160,16 @@ export function memoryBlock(text: string, tool: string): string | null {
   return text.slice(range.start + begin.length, range.stop - end.length).trim()
 }
 
-export function upsertMemoryBlock(text: string, tool: string, content: string): string {
+export function upsertMemoryBlock(text: string, tool: string, content: string, onWarning?: (message: string) => void): string {
   const { begin, end } = markers(tool)
   const block = `${begin}\n${content.trim()}\n${end}`
   const range = blockRange(text, tool)
   if (range) return `${text.slice(0, range.start)}${block}${text.slice(range.stop)}`
+  const open = text.indexOf(begin)
+  if (open !== -1) {
+    onWarning?.(`${begin} has no matching ${end}; replaced everything from it to the end of the file`)
+    return `${text.slice(0, open)}${block}\n`
+  }
   const base = text.replace(/\s*$/, '')
   return base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`
 }
