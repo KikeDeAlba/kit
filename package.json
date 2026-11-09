@@ -1,7 +1,7 @@
 {
   "name": "@kikedealba/kit",
-  "version": "0.7.1",
-  "description": "Shared contract for the @kikedealba tools: installed-tool registry, JSON envelope, event bus, agent integrations and credential store.",
+  "version": "0.8.0",
+  "description": "Shared contract for the @kikedealba tools: installed-tool registry, JSON envelope, event bus, agent integrations, credential store, profiles, settings, harness adapters and tool catalog.",
   "license": "MIT",
   "author": "Jesus Enrique De Alba Gaytan",
   "homepage": "https://github.com/KikeDeAlba/kit#readme",
@@ -49,14 +49,38 @@
     "./conformance": {
       "types": "./dist/conformance.d.ts",
       "default": "./dist/conformance.js"
-    }
+    },
+    "./profiles": {
+      "types": "./dist/profiles.d.ts",
+      "default": "./dist/profiles.js"
+    },
+    "./settings": {
+      "types": "./dist/settings.d.ts",
+      "default": "./dist/settings.js"
+    },
+    "./harness": {
+      "types": "./dist/harness/index.d.ts",
+      "default": "./dist/harness/index.js"
+    },
+    "./catalog": {
+      "types": "./dist/catalog.d.ts",
+      "default": "./dist/catalog.js"
+    },
+    "./atomic": {
+      "types": "./dist/atomic.d.ts",
+      "default": "./dist/atomic.js"
+    },
+    "./schemas/catalog.v1.json": "./schemas/catalog.v1.json",
+    "./schemas/profiles.v1.json": "./schemas/profiles.v1.json"
   },
   "bin": {
     "kit": "dist/bin/kit.js"
   },
   "files": [
     "dist",
+    "schemas",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "publishConfig": {
