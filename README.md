@@ -653,7 +653,8 @@ llaman tras cambiar el compartido. `repairSharedLinks` no fusiona nada:
 
 Si el home `claude` o `codex` de un perfil resuelve (por ejemplo, con un
 symlink) al home compartido, `syncSharedCopies` y `repairSharedLinks` lanzan
-`PROFILE_HOME_SHARED` sin mover nada.
+`PROFILE_HOME_SHARED` sin mover nada; si choca con el de otro perfil (o entre su
+`claude` y su `codex`), lanzan `PROFILE_HOME_CONFLICT`, también sin tocar nada.
 
 `removeProfile(n, { purge: true })` borra la carpeta del perfil pero no puede
 borrar la entrada del Llavero de macOS sin `claude`: en macOS devuelve

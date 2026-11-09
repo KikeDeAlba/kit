@@ -41,7 +41,8 @@
 - Homes de perfil repetidos o iguales al compartido: la lectura no falla,
   `addProfile` lanza `PROFILE_HOME_CONFLICT`, `profileHomeConflicts(n)` los lista
   e inspect da `home-conflict`; sync y repair lanzan `PROFILE_HOME_SHARED` si un
-  home resuelve al compartido (antes repair lo trataba como enlazado).
+  home resuelve al compartido (antes repair lo trataba como enlazado) y
+  `PROFILE_HOME_CONFLICT` si choca con el de otro perfil, sin tocar nada.
 - `removeProfile` devuelve `logoutRequired`, `true` solo en macOS.
 - Transcripciones confinadas al home: Claude a `projects/`, Codex a `sessions/` y
   `archived_sessions/`, Gemini a `tmp/`. `sessionId` validado con
