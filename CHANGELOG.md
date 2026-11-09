@@ -16,3 +16,18 @@
   `baseEnv` ya no ponen `BITA_CHILD` ni quitan `BITA_WRAPPER_ID`,
   `BITA_HARNESS` ni `BITA_SESSION_PROJECT`; bita debe pasar su `childEnv()` como
   `baseEnv`. Los avisos de flags descartados ya no llevan el prefijo `bita:`.
+- `envFor` en un perfil no builtin quita las credenciales de la shell por
+  prefijo (`ANTHROPIC_*`, `OPENAI_*`, `AWS_BEARER_*`, `CLAUDE_CODE_USE_*`) y por
+  nombre (`CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
+  `GOOGLE_API_KEY`) para cualquier harness, también gemini, opencode y
+  antigravity.
+- Un `KIT_CONFIG_DIR` relativo se ignora y se usa la raíz por defecto; las rutas
+  de perfil relativas hacen `PROFILES_INVALID`.
+- `withFileLock` excluye entre procesos: crea el candado con `link` atómico, guarda
+  un token propio, refresca su fecha mientras dura la sección crítica, roba un
+  candado viejo renombrándolo y solo libera el suyo. En Windows, `rename` y `rm`
+  reintentan ante `EPERM`, `EBUSY` y `EACCES`.
+- `repairSharedLinks` trata como enlazado un home de perfil que resuelve al
+  compartido y no mueve nada.
+- `rules.baseBranch` solo acepta `A-Z`, `a-z`, `0-9`, `.`, `_`, `/` y `-`, además
+  de las reglas de git.

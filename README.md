@@ -452,7 +452,9 @@ explícito se conserva el modo del archivo que ya existía.
 `writeFileAtomic(archivo, contenido, { mode?, dirMode? })` y
 `withFileLock(archivo, fn, { timeoutMs?, staleMs?, retryMs? })` se exportan
 desde la raíz y desde `@kikedealba/kit/atomic`. El candado es `<archivo>.lock`,
-creado con `wx`; uno de más de 30 s o de un proceso muerto se reemplaza.
+creado de forma atómica con un token propio que solo su dueño borra. Mientras
+dura la sección crítica se refresca su fecha; uno de más de 30 s o de un proceso
+muerto se roba renombrándolo, y solo se borra si sigue siendo el mismo.
 `profiles.json` y `settings.json` se leen y escriben dentro de ese candado, así
 que cambios en paralelo no se pierden.
 
@@ -621,7 +623,7 @@ por namespace:
 | `agents.<role>.maxTurns` | integer | el del frontmatter | nursery | 1–500 |
 | `agents.<role>.effort` | enum | el del frontmatter | nursery | `low`, `medium`, `high`, `xhigh`, `max` |
 | `rules.noAiTrace`, `noComments`, `language`, `worktrees`, `gitflow`, `delegation` | boolean | true | nursery | — |
-| `rules.baseBranch` | string | `develop` | nursery | nombre de rama git válido |
+| `rules.baseBranch` | string | `develop` | nursery | nombre de rama git válido, solo `[A-Za-z0-9._/-]` |
 | `harness.default` | enum | `claude` | den | `HARNESS_IDS` |
 | `harness.<h>.skipPermissions` | boolean | true | den | — |
 | `harness.<h>.extraArgs` | string[] | [] | den | sin `--` |
