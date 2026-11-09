@@ -72,7 +72,7 @@ function launchArgs(userArgs: readonly string[], options: LaunchOptions = DEFAUL
   const head: string[] = []
   if (parsed.resume.kind === 'continue') head.push('resume', '--last')
   else if (parsed.resume.kind === 'resume') head.push('resume', ...(parsed.resume.id ? [parsed.resume.id] : []))
-  const args = [...head, ...(options.skipPermissions ? [DEFAULT_FLAG] : []), ...options.extraArgs, ...(parsed.prompt !== null ? ['--', parsed.prompt] : [])]
+  const args = [...head, ...(options.skipPermissions && !options.extraArgs.includes(DEFAULT_FLAG) ? [DEFAULT_FLAG] : []), ...options.extraArgs, ...(parsed.prompt !== null ? ['--', parsed.prompt] : [])]
   return { args, warnings: parsed.extraFlags.map((flag) => droppedWarning(LABEL, flag)) }
 }
 

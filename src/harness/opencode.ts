@@ -24,7 +24,7 @@ function launchArgs(userArgs: readonly string[], options: LaunchOptions = DEFAUL
   }
   const prompt = parsed.prompt !== null ? [`--prompt=${parsed.prompt}`] : []
   warnings.push(...parsed.extraFlags.map((flag) => droppedWarning(LABEL, flag)))
-  return { args: [...(options.skipPermissions ? [DEFAULT_FLAG] : []), ...options.extraArgs, ...resume, ...prompt], warnings }
+  return { args: [...(options.skipPermissions && !options.extraArgs.includes(DEFAULT_FLAG) ? [DEFAULT_FLAG] : []), ...options.extraArgs, ...resume, ...prompt], warnings }
 }
 
 function legacyMessageTurn(message: Record<string, unknown>): { role: Turn['role']; text: string } | null {

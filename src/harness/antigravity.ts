@@ -91,7 +91,7 @@ function launchArgs(userArgs: readonly string[], options: LaunchOptions = DEFAUL
       : []
   const prompt = parsed.prompt !== null ? [`--prompt-interactive=${parsed.prompt}`] : []
   return {
-    args: [...(options.skipPermissions ? [SKIP_FLAG] : []), ...options.extraArgs, ...parsed.extra, ...resume, ...prompt],
+    args: [...(options.skipPermissions && !options.extraArgs.some((arg) => (CLAUDE_SKIP_PERMISSION_FLAGS as readonly string[]).includes(arg)) ? [SKIP_FLAG] : []), ...options.extraArgs, ...parsed.extra, ...resume, ...prompt],
     warnings: parsed.extraFlags.map((flag) => droppedWarning(LABEL, flag)),
   }
 }
