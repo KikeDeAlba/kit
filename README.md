@@ -233,8 +233,8 @@ El hijo no hereda todo el entorno. `headlessEnv(agent, env)` filtra con una list
 blanca común, y bita, recap e inkwell pueden usarla para lo mismo:
 
 - `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`/`TMP`/`TEMP`, `LANG`, `LC_*`,
-  `TERM`, `XDG_*`, `NVM_*`, `DEN_*` (desde 0.8, para que `DEN_PROFILE` llegue a
-  las herramientas anidadas) y `KIT_HEADLESS`.
+  `TERM`, `XDG_*`, `NVM_*`, `DEN_PROFILE` (desde 0.8, para que el perfil llegue
+  a las herramientas anidadas; el resto de `DEN_*` no pasa) y `KIT_HEADLESS`.
 - Proxy y certificados: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` (también en
   minúsculas), `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` y
   `REQUESTS_CA_BUNDLE`.
@@ -443,9 +443,18 @@ instala plugins y servidores MCP en el `CLAUDE_CONFIG_DIR` del perfil. Si se pas
 
 Toda escritura atómica de kit (`writeJsonFile`, `registerTool`, el almacén de
 credenciales en archivo, `profiles.json` y `settings.json`) resuelve antes el
-destino con `realpath` y crea el temporal junto al archivo real. Un symlink
-(por ejemplo, `settings.json` de un perfil que apunta a `~/.claude/settings.json`)
-sigue en pie y se actualiza el archivo al que apunta.
+destino con `realpath` y crea el temporal (con nombre aleatorio) junto al archivo
+real. Un symlink (por ejemplo, `settings.json` de un perfil que apunta a
+`~/.claude/settings.json`) sigue en pie y se actualiza el archivo al que apunta;
+un symlink colgante tampoco se reemplaza: se escribe en su destino. Sin `mode`
+explícito se conserva el modo del archivo que ya existía.
+
+`writeFileAtomic(archivo, contenido, { mode?, dirMode? })` y
+`withFileLock(archivo, fn, { timeoutMs?, staleMs?, retryMs? })` se exportan
+desde la raíz y desde `@kikedealba/kit/atomic`. El candado es `<archivo>.lock`,
+creado con `wx`; uno de más de 30 s o de un proceso muerto se reemplaza.
+`profiles.json` y `settings.json` se leen y escriben dentro de ese candado, así
+que cambios en paralelo no se pierden.
 
 #### Procesos, notificaciones y Windows
 
@@ -543,15 +552,20 @@ silencio al default.
    `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `GEMINI_CLI`,
    `OPENCODE`, `ANTIGRAVITY_*` de sesión, etc.).
 2. Siempre quita `CLAUDE_CONFIG_DIR` y `CODEX_HOME` heredados.
-3. En un perfil no builtin, con `claude`, `codex` o `all`, quita
-   `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
-   `OPENAI_API_KEY` y `CODEX_API_KEY`. El builtin los conserva.
+3. En un perfil no builtin, para cualquier harness, quita las credenciales de la
+   shell sin importar mayúsculas: todo `ANTHROPIC_*`, `OPENAI_*`,
+   `AWS_BEARER_*` y `CLAUDE_CODE_USE_*`, más `CLAUDE_CODE_OAUTH_TOKEN`,
+   `CODEX_API_KEY`, `GEMINI_API_KEY` y `GOOGLE_API_KEY`. El builtin las conserva.
 4. En un perfil no builtin define `CLAUDE_CONFIG_DIR` (con `claude` o `all`) y
    `CODEX_HOME` (con `codex` o `all`).
-5. Siempre define `DEN_PROFILE`.
+5. Siempre define un único `DEN_PROFILE` (quita antes cualquier variante con
+   otras mayúsculas).
 
-Con `gemini`, `antigravity` u `opencode` solo aplica los pasos 1, 2 y 5;
-`profileSupports(harness)` devuelve `false` para que quien llama avise.
+Con `gemini`, `antigravity` u `opencode` no define ningún home;
+`profileSupports(harness)` devuelve `false` para que quien llama avise de que
+esos agentes usan una sola cuenta. Las rutas de perfil y `KIT_CONFIG_DIR` deben
+ser absolutas: una ruta de perfil relativa es `PROFILES_INVALID` y un
+`KIT_CONFIG_DIR` relativo se ignora.
 
 | Función | Qué hace |
 |---|---|
@@ -569,18 +583,19 @@ Enlaces compartidos. Un perfil comparte con `~/.claude` y `~/.codex`:
 `CLAUDE.md`, `settings.json`, `skills/`, `agents/`, `commands/`, `AGENTS.md` y
 `config.toml`. Nunca se enlazan `plugins/`, `projects/`, `.claude.json`,
 `.credentials.json`, `todos/`, `auth.json`, `sessions/` ni `history.jsonl`.
-`inspectSharedLinks` da el estado de cada enlace: `linked`, `missing`,
-`foreign` (symlink a otro lado) o `replaced` (Claude Code o Codex lo cambió por
-un archivo propio). `repairSharedLinks`:
+`inspectSharedLinks` da el estado de cada enlace: `linked`, `copied` (en
+Windows, donde los archivos se copian en vez de enlazarse; cuenta como sano),
+`missing`, `foreign` (symlink a otro lado) o `replaced` (Claude Code o Codex lo
+cambió por un archivo propio). `HEALTHY_LINK_STATES` lista los estados sanos.
+`repairSharedLinks` no fusiona nada:
 
 1. Crea el destino compartido si falta (`{}` para `settings.json`, vacío para
-   los demás archivos, carpeta para los directorios).
-2. Si el enlace fue reemplazado, primero fusiona en el archivo compartido lo que
-   solo existe en la copia del perfil: claves de JSON que faltan (recursivo, el
-   compartido gana), claves y tablas de TOML que faltan, entradas de carpeta que
-   faltan, y el texto de un `.md` solo si el compartido está vacío. `merged`
-   lista lo que se agregó.
-3. Mueve la copia del perfil a `<nombre>.backup` y vuelve a enlazar.
+   los demás archivos, carpeta para los directorios). Nunca reescribe uno que ya
+   existe.
+2. Si el enlace fue reemplazado, mueve la copia del perfil a
+   `<nombre>.backup-<timestamp>` (copia y borra si está en otro volumen) y
+   devuelve esa ruta en `backup`, para que `den doctor` la muestre.
+3. Quita un enlace `foreign` y vuelve a enlazar. Los estados sanos no se tocan.
 
 `authStatus` devuelve `{ loggedIn, authMethod, email, orgName,
 subscriptionType, configDirectory }`, o `null` si `claude` no está o no responde
@@ -637,7 +652,10 @@ await settings.getSetting<number>('agents.maxParallel')
 - Errores (`SettingsError`): `UNKNOWN_KEY`, `INVALID_VALUE` y `SETTINGS_INVALID`
   (archivo corrupto; `setSetting` se niega a sobrescribirlo).
 - `onChange(prefijo, handler)` avisa dentro del proceso cuando un valor cambia de
-  verdad. Entre procesos, el refresco lo orquesta den.
+  verdad. Los manejadores corren en orden y aislados: si uno falla, los demás
+  corren igual, el valor ya quedó guardado y el error vuelve en
+  `change.warnings`; `setSetting` no se rechaza. Entre procesos, el refresco lo
+  orquesta den.
 
 ### 8. Adaptadores de agentes (`@kikedealba/kit/harness`)
 
@@ -658,13 +676,16 @@ const turns = await adapter.extractTranscript({ ...ref, profile: 'trabajo' }, ba
   no agrega el flag por defecto (`--allow-dangerously-skip-permissions`,
   `--dangerously-bypass-approvals-and-sandbox`, `--approval-mode=yolo`, `--auto`,
   `--dangerously-skip-permissions`). `extraArgs` va tal cual antes de los
-  argumentos del usuario. Sin opciones equivale a `{ skipPermissions: true,
+  argumentos del usuario; si ya trae el flag por defecto, no se repite. Sin opciones equivale a `{ skipPermissions: true,
   extraArgs: [] }`. `launchOptionsFor(id)` las lee de `harness.<id>.*`.
 - `extractTranscript(ref, baseEnv?)` y `summarize({ …, profile, baseEnv? })`
   calculan su entorno con `harnessEnv(id, profile, baseEnv)`: quitan las
   variables de sesión y, si hay perfil, aplican `envFor`. Un perfil que ya no
-  existe hace que `summarize` devuelva `{ ok: false }`. El marcador `BITA_CHILD`
-  lo pone quien llama en `baseEnv`.
+  existe hace que `summarize` devuelva `{ ok: false }`; un nombre vacío se
+  rechaza. **Cambio respecto a bita 1.9:** sin `baseEnv`, los adaptadores parten
+  de `process.env` sin las variables de sesión, pero ya no ponen `BITA_CHILD` ni
+  quitan `BITA_WRAPPER_ID`, `BITA_HARNESS` o `BITA_SESSION_PROJECT`. Quien llama
+  (bita) pasa su `childEnv()` como `baseEnv`.
 - El binario se busca primero en `KIT_HARNESS_BIN_<ID>`, luego en
   `BITA_HARNESS_BIN_<ID>` (las dos con ruta absoluta) y luego con
   `findAgentBinarySync`.
