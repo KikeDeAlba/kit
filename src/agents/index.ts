@@ -226,12 +226,14 @@ async function installMemory(integration: AgentIntegration, agent: MemoryAgent, 
   try {
     const content = renderMemory(await readFile(integration.memory, 'utf8'), agent)
     const current = existsSync(file) ? await readFile(file, 'utf8') : ''
-    const next = upsertMemoryBlock(current, integration.tool, content)
+    const warnings: string[] = []
+    const next = upsertMemoryBlock(current, integration.tool, content, (message) => warnings.push(message))
     if (next === current) return { agent, item: 'memory', state: 'present', detail: `memory block already up to date in ${file}`, path: file }
     await mkdir(path.dirname(file), { recursive: true })
     if (current.length > 0) await writeFile(`${file}.backup`, current)
     await writeFile(file, next)
-    return { agent, item: 'memory', state: 'installed', detail: `memory block written to ${file}`, path: file }
+    const note = warnings.length > 0 ? ` (${warnings.join('; ')}; previous file kept in ${file}.backup)` : ''
+    return { agent, item: 'memory', state: 'installed', detail: `memory block written to ${file}${note}`, path: file }
   } catch (error) {
     return { agent, item: 'memory', state: 'failed', detail: reason(error), path: file }
   }
