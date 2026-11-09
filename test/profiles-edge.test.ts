@@ -20,6 +20,8 @@ import {
   profilesPath,
   repairSharedLinks,
   resolveProfile,
+  syncSharedCopies,
+  filterSharedClaudeSettings,
   serializeProfiles,
   tildePath,
   type Profile,
@@ -385,7 +387,7 @@ function backupsOf(file: string): string[] {
   return readdirSync(path.dirname(file)).filter((name) => name.startsWith(prefix)).map((name) => path.join(path.dirname(file), name))
 }
 
-test('repairSharedLinks keeps a shared settings.json that is itself a symlink and never merges the local copy', { skip: posixOnly }, async (t) => {
+test('repairSharedLinks reads a shared settings.json that is itself a symlink, keeps it and backs up the edited copy', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
   const dotfiles = path.join(ctx.home, 'dotfiles', 'claude-settings.json')
@@ -399,12 +401,13 @@ test('repairSharedLinks keeps a shared settings.json that is itself a symlink an
   await writeFile(local, JSON.stringify({ model: 'sonnet', theme: 'dark' }))
 
   const repaired = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'settings.json')
-  assert.equal(repaired?.previous, 'replaced')
-  assert.equal(repaired?.state, 'linked')
+  assert.equal(repaired?.previous, 'drifted')
+  assert.equal(repaired?.state, 'generated')
   assert.ok(lstatSync(shared).isSymbolicLink())
   assert.equal(readlinkSync(shared), dotfiles)
-  assert.ok(lstatSync(local).isSymbolicLink())
-  assert.deepEqual(JSON.parse(readFileSync(dotfiles, 'utf8')), { model: 'opus' })
+  assert.ok(lstatSync(local).isFile())
+  assert.deepEqual(JSON.parse(readFileSync(local, 'utf8')), { model: 'opus' })
+  assert.equal(readFileSync(dotfiles, 'utf8'), JSON.stringify({ model: 'opus' }))
   assert.deepEqual(backupsOf(local), [repaired?.backup])
   assert.deepEqual(JSON.parse(readFileSync(repaired?.backup as string, 'utf8')), { model: 'sonnet', theme: 'dark' })
 })
@@ -441,7 +444,9 @@ test('repairSharedLinks moves any replaced file aside with a timestamped backup,
     await writeFile(shared, '{"x":1}')
     await writeFile(local, content)
     const repaired = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'settings.json')
-    assert.equal(repaired?.state, 'linked', content)
+    assert.equal(repaired?.previous, 'drifted', content)
+    assert.equal(repaired?.state, 'generated', content)
+    assert.equal(await readFile(local, 'utf8'), '{\n  "x": 1\n}\n', content)
     assert.match(path.basename(repaired?.backup as string), /^settings\.json\.backup-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(-\d+)?$/)
     assert.equal(await readFile(shared, 'utf8'), '{"x":1}', content)
     assert.equal(await readFile(repaired?.backup as string, 'utf8'), content, content)
@@ -489,7 +494,8 @@ test('repairSharedLinks handles a dir where a file is expected and a file where 
   await writeFile(path.join(claudeHome, 'settings.json', 'inner'), 'x')
   await writeFile(path.join(claudeHome, 'skills'), 'not a dir')
   const repaired = Object.fromEntries((await repairSharedLinks('work', ctx)).map((link) => [link.name, link]))
-  assert.equal(repaired['settings.json']?.state, 'linked')
+  assert.equal(repaired['settings.json']?.previous, 'replaced')
+  assert.equal(repaired['settings.json']?.state, 'generated')
   assert.equal(repaired['skills']?.state, 'linked')
   assert.equal(await readFile(path.join(repaired['settings.json']?.backup as string, 'inner'), 'utf8'), 'x')
   assert.equal(await readFile(repaired['skills']?.backup as string, 'utf8'), 'not a dir')
@@ -510,7 +516,7 @@ test('on Windows a copied file counts as healthy and repair leaves it alone', { 
   assert.equal(await readFile(path.join(profile.claude as string, 'CLAUDE.md'), 'utf8'), 'copy\n')
 })
 
-test('repairSharedLinks replaces foreign and dangling links, keeps equivalent relative links and leaves their targets alone', { skip: posixOnly }, async (t) => {
+test('repairSharedLinks replaces foreign and dangling links, keeps equivalent relative links, turns a legacy settings link into a copy and leaves targets alone', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
   const shared = path.join(ctx.home, '.claude')
@@ -521,16 +527,21 @@ test('repairSharedLinks replaces foreign and dangling links, keeps equivalent re
   await writeFile(foreign, 'foreign\n')
   await symlink(foreign, path.join(claudeHome, 'CLAUDE.md'))
   await symlink(path.join(ctx.home, 'missing-dir'), path.join(claudeHome, 'skills'))
+  await symlink(path.relative(claudeHome, path.join(shared, 'agents')), path.join(claudeHome, 'agents'))
+  await mkdir(path.join(shared, 'agents'))
   await symlink(path.relative(claudeHome, path.join(shared, 'settings.json')), path.join(claudeHome, 'settings.json'))
-  await writeFile(path.join(shared, 'settings.json'), '{}')
+  await writeFile(path.join(shared, 'settings.json'), '{"apiKeyHelper":"/bin/key","model":"opus"}')
   const before = Object.fromEntries((await inspectSharedLinks('work', ctx)).map((link) => [link.name, link.state]))
-  assert.deepEqual([before['CLAUDE.md'], before['skills'], before['settings.json']], ['foreign', 'foreign', 'linked'])
+  assert.deepEqual([before['CLAUDE.md'], before['skills'], before['agents'], before['settings.json']], ['foreign', 'foreign', 'linked', 'foreign'])
   await repairSharedLinks('work', ctx)
   assert.equal(readlinkSync(path.join(claudeHome, 'CLAUDE.md')), path.join(shared, 'CLAUDE.md'))
-  assert.equal(readlinkSync(path.join(claudeHome, 'settings.json')), path.relative(claudeHome, path.join(shared, 'settings.json')))
+  assert.equal(readlinkSync(path.join(claudeHome, 'agents')), path.relative(claudeHome, path.join(shared, 'agents')))
+  assert.ok(lstatSync(path.join(claudeHome, 'settings.json')).isFile())
+  assert.deepEqual(JSON.parse(readFileSync(path.join(claudeHome, 'settings.json'), 'utf8')), { model: 'opus' })
+  assert.equal(await readFile(path.join(shared, 'settings.json'), 'utf8'), '{"apiKeyHelper":"/bin/key","model":"opus"}')
   assert.equal(await readFile(foreign, 'utf8'), 'foreign\n')
   assert.equal(await readFile(path.join(shared, 'CLAUDE.md'), 'utf8'), 'shared\n')
-  assert.ok((await inspectSharedLinks('work', ctx)).every((link) => link.state === 'linked'))
+  assert.ok((await inspectSharedLinks('work', ctx)).every((link) => link.state === 'linked' || link.state === 'generated'))
 })
 
 test('repairSharedLinks never links credentials, sessions, plugins or history', { skip: posixOnly }, async (t) => {
@@ -544,7 +555,6 @@ test('repairSharedLinks never links credentials, sessions, plugins or history', 
     'claude/settings.json',
     'claude/skills',
     'codex/AGENTS.md',
-    'codex/config.toml',
   ])
   const profile = await getProfile('work', ctx)
   for (const name of ['.credentials.json', '.claude.json', 'plugins', 'projects', 'todos']) assert.equal(existsSync(path.join(profile.claude as string, name)), false, name)
@@ -552,17 +562,18 @@ test('repairSharedLinks never links credentials, sessions, plugins or history', 
   assert.equal(existsSync(path.join(ctx.home, '.claude', '.credentials.json')), false)
 })
 
-test('repairSharedLinks refuses a missing profile and the first run creates empty shared targets', { skip: posixOnly }, async (t) => {
+test('repairSharedLinks refuses a missing profile and the first run creates empty shared link targets only', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await assert.rejects(repairSharedLinks('ghost', ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_NOT_FOUND')
   await addProfile('work', ctx)
   await repairSharedLinks('work', ctx)
-  assert.equal(readFileSync(path.join(ctx.home, '.claude', 'settings.json'), 'utf8'), '{}\n')
+  assert.equal(existsSync(path.join(ctx.home, '.claude', 'settings.json')), false)
+  assert.equal(readFileSync(path.join((await getProfile('work', ctx)).claude as string, 'settings.json'), 'utf8'), '{}\n')
   assert.equal(readFileSync(path.join(ctx.home, '.claude', 'CLAUDE.md'), 'utf8'), '')
-  assert.equal(readFileSync(path.join(ctx.home, '.codex', 'config.toml'), 'utf8'), '')
+  assert.equal(existsSync(path.join(ctx.home, '.codex', 'config.toml')), false)
   assert.ok(statSync(path.join(ctx.home, '.claude', 'skills')).isDirectory())
   const second = await repairSharedLinks('work', ctx)
-  assert.ok(second.every((link) => link.previous === 'linked' && link.backup === null))
+  assert.ok(second.every((link) => (link.previous === 'linked' || link.previous === 'generated') && link.backup === null), JSON.stringify(second))
   assert.deepEqual(backupsOf(path.join((await getProfile('work', ctx)).claude as string, 'settings.json')), [])
 })
 
@@ -586,20 +597,100 @@ test('relative profile directories and a relative KIT_CONFIG_DIR are not accepte
   assert.equal(profilesPath(platformContext({ platform: 'linux', home: '/h', env: { KIT_CONFIG_DIR: 'relative/cfg' } })), '/h/.config/kikedealba/profiles.json')
 })
 
-test('a profile home that resolves to the shared home counts as linked and nothing is moved', { skip: posixOnly }, async (t) => {
+test('a profile home that resolves to the shared home makes inspect, sync and repair refuse without moving anything', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   const { profile } = await addProfile('work', ctx)
   const shared = path.join(ctx.home, '.claude')
   await mkdir(shared, { recursive: true })
   await writeFile(path.join(shared, 'CLAUDE.md'), 'shared rules\n')
-  await writeFile(path.join(shared, 'settings.json'), '{"model":"opus"}')
+  await writeFile(path.join(shared, 'settings.json'), '{"model":"opus","apiKeyHelper":"/bin/key"}')
   await rm(profile.claude as string, { recursive: true })
   await symlink(shared, profile.claude as string)
-  const claude = (await inspectSharedLinks('work', ctx)).filter((link) => link.harness === 'claude')
-  assert.ok(claude.every((link) => link.state === 'linked'), JSON.stringify(claude))
-  const repaired = (await repairSharedLinks('work', ctx)).filter((link) => link.harness === 'claude')
-  assert.ok(repaired.every((link) => link.previous === 'linked' && link.backup === null))
+  const refused = (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_HOME_SHARED'
+  await assert.rejects(inspectSharedLinks('work', ctx), refused)
+  await assert.rejects(syncSharedCopies('work', ctx), refused)
+  await assert.rejects(repairSharedLinks('work', ctx), refused)
   assert.equal(await readFile(path.join(shared, 'CLAUDE.md'), 'utf8'), 'shared rules\n')
-  assert.ok(lstatSync(path.join(shared, 'CLAUDE.md')).isFile())
-  assert.deepEqual(readdirSync(shared).filter((name) => name.includes('.backup-')), [])
+  assert.equal(await readFile(path.join(shared, 'settings.json'), 'utf8'), '{"model":"opus","apiKeyHelper":"/bin/key"}')
+  assert.deepEqual(readdirSync(shared).filter((name) => name.includes('.backup-') || name === '.den-shared.json'), [])
+})
+
+test('filterSharedClaudeSettings drops credential helpers and agent account variables but keeps the rest', () => {
+  const filtered = filterSharedClaudeSettings({
+    model: 'opus',
+    apiKeyHelper: '/bin/key',
+    awsCredentialExport: '/bin/aws',
+    awsAuthRefresh: 'aws sso login',
+    otelHeadersHelper: '/bin/otel',
+    permissions: { allow: ['Bash(ls)'] },
+    env: { ANTHROPIC_API_KEY: 'a', CLAUDE_CODE_USE_BEDROCK: '1', AWS_BEARER_TOKEN_BEDROCK: 'b', GITHUB_TOKEN: 'g', AWS_PROFILE: 'p', DISABLE_TELEMETRY: '1' },
+  })
+  assert.deepEqual(filtered, { model: 'opus', permissions: { allow: ['Bash(ls)'] }, env: { GITHUB_TOKEN: 'g', AWS_PROFILE: 'p', DISABLE_TELEMETRY: '1' } })
+})
+
+test('the settings copy reports generated, stale and drifted; sync regenerates stale and missing copies but never a drifted one', { skip: posixOnly }, async (t) => {
+  const ctx = await sandboxed(t)
+  await addProfile('work', ctx)
+  const shared = path.join(ctx.home, '.claude', 'settings.json')
+  await mkdir(path.dirname(shared), { recursive: true })
+  await writeFile(shared, JSON.stringify({ model: 'opus', apiKeyHelper: '/bin/key', env: { ANTHROPIC_API_KEY: 'x', LANG: 'es' } }))
+  const claudeHome = (await getProfile('work', ctx)).claude as string
+  const copy = path.join(claudeHome, 'settings.json')
+  const state = async () => (await inspectSharedLinks('work', ctx)).find((link) => link.name === 'settings.json')?.state
+
+  assert.equal(await state(), 'missing')
+  const synced = await syncSharedCopies('work', ctx)
+  assert.deepEqual(synced.map((link) => [link.name, link.previous, link.state, link.backup]), [['settings.json', 'missing', 'generated', null]])
+  assert.deepEqual(JSON.parse(readFileSync(copy, 'utf8')), { model: 'opus', env: { LANG: 'es' } })
+  assert.equal(readFileSync(copy, 'utf8').includes('.den-shared'), false)
+  const marker = JSON.parse(readFileSync(path.join(claudeHome, '.den-shared.json'), 'utf8'))
+  assert.equal(marker.version, 1)
+  assert.match(marker.files['settings.json'].sha256, /^[0-9a-f]{64}$/)
+  assert.equal(await state(), 'generated')
+
+  await writeFile(shared, JSON.stringify({ model: 'opus', apiKeyHelper: '/bin/other' }))
+  await writeFile(shared, JSON.stringify({ model: 'sonnet' }))
+  assert.equal(await state(), 'stale')
+  assert.deepEqual((await syncSharedCopies('work', ctx)).map((link) => [link.previous, link.state]), [['stale', 'generated']])
+  assert.deepEqual(JSON.parse(readFileSync(copy, 'utf8')), { model: 'sonnet' })
+
+  await writeFile(copy, JSON.stringify({ model: 'haiku' }))
+  await writeFile(shared, JSON.stringify({ model: 'opus' }))
+  assert.equal(await state(), 'drifted')
+  assert.deepEqual((await syncSharedCopies('work', ctx)).map((link) => [link.previous, link.state, link.backup]), [['drifted', 'drifted', null]])
+  assert.deepEqual(JSON.parse(readFileSync(copy, 'utf8')), { model: 'haiku' })
+  assert.deepEqual(backupsOf(copy), [])
+  const repaired = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'settings.json')
+  assert.deepEqual([repaired?.previous, repaired?.state], ['drifted', 'generated'])
+  assert.deepEqual(JSON.parse(readFileSync(repaired?.backup as string, 'utf8')), { model: 'haiku' })
+  assert.deepEqual(JSON.parse(readFileSync(copy, 'utf8')), { model: 'opus' })
+  assert.equal(statSync(copy).mode & 0o777, 0o600)
+})
+
+test('an unreadable shared settings.json is reported instead of copied, and the builtin profile has no copies', { skip: posixOnly }, async (t) => {
+  const ctx = await sandboxed(t)
+  await addProfile('work', ctx)
+  const shared = path.join(ctx.home, '.claude', 'settings.json')
+  await mkdir(path.dirname(shared), { recursive: true })
+  for (const content of ['{"a":', '[1]', 'null']) {
+    await writeFile(shared, content)
+    await assert.rejects(syncSharedCopies('work', ctx), (error: unknown) => error instanceof ProfileError && error.code === 'SHARED_COPY_INVALID', content)
+  }
+  assert.equal(existsSync(path.join((await getProfile('work', ctx)).claude as string, 'settings.json')), false)
+  assert.deepEqual(await syncSharedCopies('default', ctx), [])
+})
+
+test('parseProfiles rejects profile homes that are a shared home or that two entries share', () => {
+  const ctx = platformContext({ platform: 'linux', home: '/h', env: {} })
+  const cases: Record<string, unknown>[] = [
+    { b: { claude: '~/.claude', codex: '/p/b/codex' } },
+    { b: { claude: '/h/.codex/', codex: '/p/b/codex' } },
+    { b: { claude: '/p/same', codex: '/p/same' } },
+    { b: { claude: '/p/b/claude', codex: '/p/b/codex' }, c: { claude: '/p/c/claude', codex: '/p/b/codex' } },
+    { b: { claude: '/p/b/claude', codex: '/p/b/codex' }, c: { claude: '/p/b/./claude', codex: '/p/c/codex' } },
+  ]
+  for (const extra of cases) {
+    assert.throws(() => parseProfiles({ version: 1, default: 'a', profiles: { a: { builtin: true }, ...extra } }, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILES_INVALID', JSON.stringify(extra))
+  }
+  assert.doesNotThrow(() => parseProfiles({ version: 1, default: 'a', profiles: { a: { builtin: true }, b: { claude: '/p/b/claude', codex: '/p/b/codex' }, c: { claude: '/p/c/claude', codex: '/p/c/codex' } } }, ctx))
 })
