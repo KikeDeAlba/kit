@@ -79,7 +79,7 @@ test('extraArgs always land before the resume and prompt arguments and keep thei
   }
 })
 
-test('extraArgs equal to the default flag are not repeated when skipPermissions is on', { todo: 'claude and gemini de-duplicate, but codex, opencode and antigravity emit the default flag twice' }, () => {
+test('extraArgs equal to the default flag are not repeated when skipPermissions is on', () => {
   for (const adapter of listAdapters()) {
     const flag = adapter.launchArgs([]).args[0] as string
     const args = adapter.launchArgs([], { skipPermissions: true, extraArgs: [flag] }).args
@@ -170,4 +170,10 @@ test('a broken KIT_ override disables the binary instead of silently using the B
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
   }
+})
+
+test('harnessEnv treats undefined like null and rejects an empty profile name', async () => {
+  const base = baseEnv({ CLAUDE_CONFIG_DIR: '/kept' })
+  assert.equal((await harnessEnv('claude', undefined, base))['CLAUDE_CONFIG_DIR'], '/kept')
+  await assert.rejects(harnessEnv('claude', '', base), /empty/)
 })
