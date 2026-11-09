@@ -261,7 +261,7 @@ test('gemini runs each summary in its own workspace and removes what it register
   }
 })
 
-test('opencode runs standalone and read-only with the plan agent and an empty config dir, retries once and deletes its sessions', async () => {
+test('opencode runs standalone and read-only with the plan agent and a deny-all config dir, retries once and deletes its sessions', async () => {
   useFake('opencode')
   replies([opencodeEvents('ses_a', 'sin json'), opencodeEvents('ses_b', JSON.stringify(summary)), ''])
   const result = await getAdapter('opencode').summarize(input())
@@ -275,7 +275,8 @@ test('opencode runs standalone and read-only with the plan agent and an empty co
     const transcript = argv[argv.indexOf('-f') + 1] ?? ''
     assert.deepEqual(argv, ['run', '--standalone', '--format', 'json', '--agent', 'plan', '-m', 'openai/gpt-5.6-luna', '-f', transcript])
     assert.match(call?.files['-f'] as string, /### Usuario\nAgrega export CSV/)
-    assert.deepEqual(call?.files['OPENCODE_CONFIG_DIR'], [])
+    assert.deepEqual(call?.files['OPENCODE_CONFIG_DIR'], ['opencode.json'])
+    assert.deepEqual(JSON.parse(call?.files['opencode.json'] as string).permission, { bash: 'deny', edit: 'deny', webfetch: 'deny', write: 'deny' })
     assert.match(call?.stdin ?? '', /Devuelve SOLO un objeto JSON|devuelve SOLO un objeto JSON/)
   }
   assert.match(second?.stdin ?? '', /no pasó la validación/)
