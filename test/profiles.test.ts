@@ -14,7 +14,6 @@ import {
   inspectSharedLinks,
   listProfiles,
   mapDir,
-  mergeMissingToml,
   profileHome,
   profileHomes,
   profileSupports,
@@ -87,7 +86,9 @@ test('envFor on a non-builtin profile drops tokens and sets the home of each har
   const gemini = envFor(work, 'gemini', inherited)
   assert.equal(gemini['CLAUDE_CONFIG_DIR'], undefined)
   assert.equal(gemini['CODEX_HOME'], undefined)
-  assert.equal(gemini['ANTHROPIC_API_KEY'], 'sk-ant')
+  assert.equal(gemini['ANTHROPIC_API_KEY'], undefined)
+  const prefixed = envFor(work, 'gemini', { ANTHROPIC_BASE_URL: 'u', OPENAI_ORG: 'o', AWS_BEARER_TOKEN_BEDROCK: 'b', CLAUDE_CODE_USE_BEDROCK: '1', GEMINI_API_KEY: 'g', GOOGLE_API_KEY: 'k', CLAUDE_CODE_SSE_PORT: '1', AWS_REGION: 'r' })
+  assert.deepEqual(Object.keys(prefixed).sort(), ['AWS_REGION', 'CLAUDE_CODE_SSE_PORT', 'DEN_PROFILE'])
   assert.equal(gemini['CLAUDECODE'], undefined)
   assert.equal(gemini[PROFILE_ENV], 'work')
 })
@@ -243,82 +244,52 @@ test('an invalid profiles.json fails with PROFILES_INVALID', async (t) => {
   }
 })
 
-test('shared links are created, detected when replaced and repaired by merging the profile copy first', { skip: posixOnly }, async (t) => {
+test('shared links are created, detected when replaced and repaired with a backup instead of a merge', { skip: posixOnly }, async (t) => {
   const ctx = await home(t)
   await addProfile('work', ctx)
   const shared = path.join(ctx.home, '.claude')
-  const sharedCodex = path.join(ctx.home, '.codex')
   await mkdir(path.join(shared, 'skills', 'kept'), { recursive: true })
-  await writeFile(path.join(shared, 'settings.json'), JSON.stringify({ model: 'opus', permissions: { allow: ['Read'] } }))
-  await mkdir(sharedCodex, { recursive: true })
-  await writeFile(path.join(sharedCodex, 'config.toml'), 'model = "gpt"\n\n[mcp_servers.gaze]\ncommand = "gaze"\n')
+  await writeFile(path.join(shared, 'settings.json'), JSON.stringify({ model: 'opus' }))
 
   const before = await inspectSharedLinks('work', ctx)
   assert.equal(before.length, 7)
   assert.ok(before.every((link) => link.state === 'missing'))
 
   const first = await repairSharedLinks('work', ctx)
-  assert.ok(first.every((link) => link.state === 'linked'), JSON.stringify(first))
+  assert.ok(first.every((link) => link.state === 'linked' && link.backup === null), JSON.stringify(first))
   const profile = await getProfile('work', ctx)
   const claudeHome = profile.claude as string
-  const codexHome = profile.codex as string
   assert.equal(readlinkSync(path.join(claudeHome, 'settings.json')), path.join(shared, 'settings.json'))
   assert.equal(existsSync(path.join(shared, 'CLAUDE.md')), true)
-  assert.equal(existsSync(path.join(shared, 'agents')), true)
-  assert.equal(existsSync(path.join(sharedCodex, 'AGENTS.md')), true)
-
-  await repairSharedLinks('work', ctx)
-  assert.ok((await inspectSharedLinks('work', ctx)).every((link) => link.state === 'linked'))
+  assert.equal(existsSync(path.join(ctx.home, '.codex', 'AGENTS.md')), true)
 
   const settings = path.join(claudeHome, 'settings.json')
-  await writeFile(`${settings}.tmp`, JSON.stringify({ model: 'sonnet', theme: 'dark', permissions: { allow: ['Bash'], deny: ['Write'] } }))
+  await writeFile(`${settings}.tmp`, JSON.stringify({ model: 'sonnet', theme: 'dark' }))
   await rename(`${settings}.tmp`, settings)
-  const toml = path.join(codexHome, 'config.toml')
-  await rm(toml)
-  await writeFile(toml, 'model = "other"\napproval = "never"\n\n[mcp_servers.gaze]\ncommand = "gaze"\nargs = ["mcp"]\n\n[profiles.fast]\nmodel = "mini"\n')
-  const skills = path.join(claudeHome, 'skills')
-  await rm(skills)
-  await mkdir(path.join(skills, 'kept'), { recursive: true })
-  await mkdir(path.join(skills, 'fresh'), { recursive: true })
-  await writeFile(path.join(skills, 'fresh', 'SKILL.md'), 'fresh')
   const other = path.join(ctx.home, 'other.md')
   await writeFile(other, 'x')
   await rm(path.join(claudeHome, 'CLAUDE.md'))
   await symlink(other, path.join(claudeHome, 'CLAUDE.md'))
 
   const inspected = Object.fromEntries((await inspectSharedLinks('work', ctx)).map((link) => [link.name, link.state]))
-  assert.deepEqual(inspected, { 'CLAUDE.md': 'foreign', 'settings.json': 'replaced', skills: 'replaced', agents: 'linked', commands: 'linked', 'AGENTS.md': 'linked', 'config.toml': 'replaced' })
+  assert.deepEqual(inspected, { 'CLAUDE.md': 'foreign', 'settings.json': 'replaced', skills: 'linked', agents: 'linked', commands: 'linked', 'AGENTS.md': 'linked', 'config.toml': 'linked' })
 
   const repaired = Object.fromEntries((await repairSharedLinks('work', ctx)).map((link) => [link.name, link]))
   assert.ok(Object.values(repaired).every((link) => link.state === 'linked'))
-  assert.deepEqual(repaired['settings.json']?.merged, ['theme', 'permissions.deny'])
   assert.equal(repaired['settings.json']?.previous, 'replaced')
-  assert.equal(repaired['settings.json']?.backup, `${settings}.backup`)
-  assert.deepEqual(JSON.parse(await readFile(path.join(shared, 'settings.json'), 'utf8')), { model: 'opus', permissions: { allow: ['Read'], deny: ['Write'] }, theme: 'dark' })
-  assert.deepEqual(JSON.parse(await readFile(`${settings}.backup`, 'utf8')).model, 'sonnet')
-  assert.deepEqual(repaired['config.toml']?.merged, ['approval', 'mcp_servers.gaze.args', '[profiles.fast]'])
-  const mergedToml = await readFile(path.join(sharedCodex, 'config.toml'), 'utf8')
-  assert.match(mergedToml, /^model = "gpt"\napproval = "never"\n/)
-  assert.match(mergedToml, /\[mcp_servers\.gaze\]\ncommand = "gaze"\nargs = \["mcp"\]\n/)
-  assert.match(mergedToml, /\[profiles\.fast\]\nmodel = "mini"\n$/)
-  assert.deepEqual(repaired['skills']?.merged, ['fresh'])
-  assert.equal(await readFile(path.join(shared, 'skills', 'fresh', 'SKILL.md'), 'utf8'), 'fresh')
-  assert.equal(existsSync(path.join(`${skills}.backup`, 'kept')), true)
+  assert.ok(repaired['settings.json']?.backup?.startsWith(`${settings}.backup-`))
+  assert.deepEqual(JSON.parse(await readFile(path.join(shared, 'settings.json'), 'utf8')), { model: 'opus' })
+  assert.deepEqual(JSON.parse(await readFile(repaired['settings.json']?.backup as string, 'utf8')), { model: 'sonnet', theme: 'dark' })
   assert.equal(repaired['CLAUDE.md']?.previous, 'foreign')
+  assert.equal(repaired['CLAUDE.md']?.backup, null)
+  assert.equal(await readFile(other, 'utf8'), 'x')
   assert.ok(lstatSync(path.join(claudeHome, 'CLAUDE.md')).isSymbolicLink())
-  assert.equal(readlinkSync(path.join(claudeHome, 'CLAUDE.md')), path.join(shared, 'CLAUDE.md'))
 })
 
 test('the builtin profile has no shared links', async (t) => {
   const ctx = await home(t)
   assert.deepEqual(await inspectSharedLinks('default', ctx), [])
   assert.deepEqual(await repairSharedLinks('default', ctx), [])
-})
-
-test('mergeMissingToml adds root keys before the first table and leaves an equal file alone', () => {
-  assert.deepEqual(mergeMissingToml('a = 1\n', 'a = 2\n'), { text: 'a = 1\n', added: [] })
-  assert.deepEqual(mergeMissingToml('', 'a = 2\n[t]\nb = 1\n'), { text: 'a = 2\n\n[t]\nb = 1\n', added: ['a', '[t]'] })
-  assert.equal(mergeMissingToml('[t]\nx = 1\n', 'top = true\n').text, 'top = true\n[t]\nx = 1\n')
 })
 
 test('authStatus runs claude auth status with the profile home and reads logged out answers too', { skip: posixOnly }, async (t) => {

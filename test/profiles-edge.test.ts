@@ -15,8 +15,6 @@ import {
   inspectSharedLinks,
   listProfiles,
   mapDir,
-  mergeMissingJson,
-  mergeMissingToml,
   parseProfiles,
   profileHomes,
   profilesPath,
@@ -124,7 +122,7 @@ test('envFor drops inherited homes and tokens whatever the case of their names',
   assert.deepEqual(Object.keys(envFor(builtin, 'claude', { claude_config_dir: '/x', Codex_Home: '/y', PATH: '/bin' })).sort(), ['DEN_PROFILE', 'PATH'])
 })
 
-test('envFor leaves a single DEN_PROFILE even if the base used another case', { todo: 'envFor sets DEN_PROFILE without removing a differently cased inherited key, so a win32 child sees two' }, () => {
+test('envFor leaves a single DEN_PROFILE even if the base used another case', () => {
   const env = envFor(work, 'claude', { den_profile: 'other', PATH: '/bin' })
   assert.deepEqual(Object.keys(env).filter((key) => key.toUpperCase() === 'DEN_PROFILE'), ['DEN_PROFILE'])
   assert.equal(env[PROFILE_ENV], 'work')
@@ -193,7 +191,7 @@ test('resolveProfile tolerates a mapped dir that no longer exists and a cwd that
   assert.deepEqual(await sourceOf(ctx, path.join(ctx.home, 'elsewhere')), ['default', 'default'])
 })
 
-test('resolveProfile finds a mapping when the cwd does not exist under a symlinked mapped dir', { skip: posixOnly, todo: 'realOrResolved does not resolve the existing ancestors of a missing cwd, so a symlinked path misses the realpath mapping' }, async (t) => {
+test('resolveProfile finds a mapping when the cwd does not exist under a symlinked mapped dir', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
   const real = path.join(ctx.home, 'real')
@@ -203,7 +201,7 @@ test('resolveProfile finds a mapping when the cwd does not exist under a symlink
   assert.deepEqual(await sourceOf(ctx, path.join(ctx.home, 'alias', 'missing')), ['work', 'dir'])
 })
 
-test('resolveProfile matches a child whose name starts with two dots', { skip: posixOnly, todo: 'isWithin treats any relative path starting with ".." as outside, including a directory named "..hidden"' }, async (t) => {
+test('resolveProfile matches a child whose name starts with two dots', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
   const root = path.join(ctx.home, 'root')
@@ -213,7 +211,7 @@ test('resolveProfile matches a child whose name starts with two dots', { skip: p
   assert.deepEqual(await sourceOf(ctx, child), ['work', 'dir'])
 })
 
-test('tildePath stores a home child whose name starts with two dots as ~/', { todo: 'tildePath uses startsWith("..") on the relative path and keeps the absolute path for a "..hidden" directory' }, () => {
+test('tildePath stores a home child whose name starts with two dots as ~/', () => {
   const ctx = platformContext({ platform: 'linux', home: '/home/me', env: {} })
   assert.equal(tildePath('/home/me/..hidden/x', ctx), '~/..hidden/x')
 })
@@ -236,18 +234,19 @@ test('the explicit profile beats DEN_PROFILE and a mapped dir; empty values fall
   await assert.rejects(resolveProfile({ cwd: dir, explicit: 'ghost' }, withEnv), notFound)
 })
 
-test('names that exist on Object.prototype are not profiles', { todo: 'profiles is a plain object and lookups use `in` and indexing, so "constructor" and "toString" resolve to inherited members' }, async (t) => {
+test('names that exist on Object.prototype are not profiles', async (t) => {
   const ctx = await sandboxed(t)
   const notFound = (error: unknown): boolean => error instanceof ProfileError && error.code === 'PROFILE_NOT_FOUND'
-  for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
-    await assert.rejects(resolveProfile({ explicit: name }, ctx), notFound, name)
-    const added = await addProfile(name, ctx)
-    assert.equal(added.created, true, name)
-    assert.equal((await getProfile(name, ctx)).builtin, false, name)
+  for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) await assert.rejects(resolveProfile({ explicit: name }, ctx), notFound, name)
+  const added = await addProfile('constructor', ctx)
+  assert.equal(added.created, true)
+  assert.equal((await getProfile('constructor', ctx)).builtin, false)
+  for (const name of ['toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+    await assert.rejects(addProfile(name, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_INVALID_NAME', name)
   }
 })
 
-test('a file whose default or dirs name an inherited member is rejected', { todo: 'parseProfiles validates `default` and dirs[].profile with `in`, which is true for inherited members' }, () => {
+test('a file whose default or dirs name an inherited member is rejected', () => {
   const ctx = platformContext({ platform: 'linux', home: '/h', env: {} })
   const base = { version: 1, profiles: { personal: { builtin: true } } }
   assert.throws(() => parseProfiles({ ...base, default: 'constructor' }, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILES_INVALID')
@@ -381,7 +380,12 @@ test('a missing profiles.json is never created by reading', async (t) => {
   assert.equal(existsSync(profilesPath(ctx)), false)
 })
 
-test('repairSharedLinks merges into a shared settings.json that is itself a symlink and keeps both links', { skip: posixOnly }, async (t) => {
+function backupsOf(file: string): string[] {
+  const prefix = `${path.basename(file)}.backup-`
+  return readdirSync(path.dirname(file)).filter((name) => name.startsWith(prefix)).map((name) => path.join(path.dirname(file), name))
+}
+
+test('repairSharedLinks keeps a shared settings.json that is itself a symlink and never merges the local copy', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
   const dotfiles = path.join(ctx.home, 'dotfiles', 'claude-settings.json')
@@ -391,18 +395,21 @@ test('repairSharedLinks merges into a shared settings.json that is itself a syml
   const shared = path.join(ctx.home, '.claude', 'settings.json')
   await symlink(dotfiles, shared)
   const claudeHome = (await getProfile('work', ctx)).claude as string
-  await writeFile(path.join(claudeHome, 'settings.json'), JSON.stringify({ model: 'sonnet', theme: 'dark' }))
+  const local = path.join(claudeHome, 'settings.json')
+  await writeFile(local, JSON.stringify({ model: 'sonnet', theme: 'dark' }))
 
-  const repaired = await repairSharedLinks('work', ctx)
-  assert.deepEqual(repaired.find((link) => link.name === 'settings.json')?.merged, ['theme'])
+  const repaired = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'settings.json')
+  assert.equal(repaired?.previous, 'replaced')
+  assert.equal(repaired?.state, 'linked')
   assert.ok(lstatSync(shared).isSymbolicLink())
   assert.equal(readlinkSync(shared), dotfiles)
-  assert.ok(lstatSync(path.join(claudeHome, 'settings.json')).isSymbolicLink())
-  assert.deepEqual(JSON.parse(readFileSync(dotfiles, 'utf8')), { model: 'opus', theme: 'dark' })
-  assert.deepEqual(readdirSync(path.dirname(dotfiles)).sort(), ['claude-settings.json'])
+  assert.ok(lstatSync(local).isSymbolicLink())
+  assert.deepEqual(JSON.parse(readFileSync(dotfiles, 'utf8')), { model: 'opus' })
+  assert.deepEqual(backupsOf(local), [repaired?.backup])
+  assert.deepEqual(JSON.parse(readFileSync(repaired?.backup as string, 'utf8')), { model: 'sonnet', theme: 'dark' })
 })
 
-test('repairSharedLinks keeps the mode of the shared file it rewrites', { skip: posixOnly, todo: 'writeFileAtomic without a mode creates the temporary file with the default mode and renames it over the original, so a 0600 ~/.claude/settings.json becomes 0644' }, async (t) => {
+test('repairSharedLinks never rewrites the shared file, so its mode stays', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
   const shared = path.join(ctx.home, '.claude', 'settings.json')
@@ -418,69 +425,46 @@ test('repairSharedLinks keeps the mode of the shared file it rewrites', { skip: 
     process.umask(previous)
   }
   assert.equal(statSync(shared).mode & 0o777, 0o600)
+  assert.equal(await readFile(shared, 'utf8'), JSON.stringify({ model: 'opus' }))
 })
 
-test('repairSharedLinks never loses the local copy when a JSON file cannot be merged', { skip: posixOnly }, async (t) => {
+test('repairSharedLinks moves any replaced file aside with a timestamped backup, whatever its content', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
   const shared = path.join(ctx.home, '.claude', 'settings.json')
   await mkdir(path.dirname(shared), { recursive: true })
   const claudeHome = (await getProfile('work', ctx)).claude as string
   const local = path.join(claudeHome, 'settings.json')
-  const cases: { label: string; local: string; shared: string; sharedAfter: string }[] = [
-    { label: 'invalid local', local: '{"a":', shared: '{"x":1}', sharedAfter: '{"x":1}' },
-    { label: 'invalid shared', local: '{"a":1}', shared: '{"x":', sharedAfter: '{"x":' },
-    { label: 'array local', local: '[1,2]', shared: '{"x":1}', sharedAfter: '{"x":1}' },
-    { label: 'array shared', local: '{"a":1}', shared: '[1]', sharedAfter: '[1]' },
-    { label: 'null local', local: 'null', shared: '{"x":1}', sharedAfter: '{"x":1}' },
-  ]
-  for (const item of cases) {
+  for (const content of ['{"a":', '[1,2]', 'null', '{"a":1}']) {
     await rm(local, { force: true })
-    await rm(`${local}.backup`, { force: true })
-    await rm(shared, { force: true })
-    await writeFile(local, item.local)
-    await writeFile(shared, item.shared)
+    for (const old of backupsOf(local)) await rm(old, { force: true })
+    await writeFile(shared, '{"x":1}')
+    await writeFile(local, content)
     const repaired = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'settings.json')
-    assert.equal(repaired?.state, 'linked', item.label)
-    assert.deepEqual(repaired?.merged, [], item.label)
-    assert.equal(await readFile(shared, 'utf8'), item.sharedAfter, item.label)
-    assert.equal(await readFile(`${local}.backup`, 'utf8'), item.local, item.label)
+    assert.equal(repaired?.state, 'linked', content)
+    assert.match(path.basename(repaired?.backup as string), /^settings\.json\.backup-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(-\d+)?$/)
+    assert.equal(await readFile(shared, 'utf8'), '{"x":1}', content)
+    assert.equal(await readFile(repaired?.backup as string, 'utf8'), content, content)
   }
 })
 
-test('repairSharedLinks adopts a replaced file when the shared one is empty and survives an empty shared JSON', { skip: posixOnly }, async (t) => {
+test('two repairs in a row keep both backups instead of overwriting the first', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
-  const shared = path.join(ctx.home, '.claude')
-  await mkdir(shared, { recursive: true })
-  await writeFile(path.join(shared, 'settings.json'), '')
-  await writeFile(path.join(shared, 'CLAUDE.md'), '\n')
   const claudeHome = (await getProfile('work', ctx)).claude as string
-  await writeFile(path.join(claudeHome, 'settings.json'), '{"a":{"b":1}}')
-  await writeFile(path.join(claudeHome, 'CLAUDE.md'), 'my rules\n')
-  const repaired = Object.fromEntries((await repairSharedLinks('work', ctx)).map((link) => [link.name, link]))
-  assert.deepEqual(repaired['settings.json']?.merged, ['a'])
-  assert.deepEqual(JSON.parse(await readFile(path.join(shared, 'settings.json'), 'utf8')), { a: { b: 1 } })
-  assert.deepEqual(repaired['CLAUDE.md']?.merged, ['content'])
-  assert.equal(await readFile(path.join(shared, 'CLAUDE.md'), 'utf8'), 'my rules\n')
+  const local = path.join(claudeHome, 'CLAUDE.md')
+  await writeFile(local, 'first\n')
+  const first = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'CLAUDE.md')?.backup
+  await rm(local)
+  await writeFile(local, 'second\n')
+  const second = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'CLAUDE.md')?.backup
+  assert.notEqual(first, second)
+  assert.equal(await readFile(first as string, 'utf8'), 'first\n')
+  assert.equal(await readFile(second as string, 'utf8'), 'second\n')
+  assert.equal(await readFile(path.join(ctx.home, '.claude', 'CLAUDE.md'), 'utf8'), '')
 })
 
-test('repairSharedLinks never overwrites a non-empty shared markdown file with the local copy', { skip: posixOnly }, async (t) => {
-  const ctx = await sandboxed(t)
-  await addProfile('work', ctx)
-  const shared = path.join(ctx.home, '.claude')
-  await mkdir(shared, { recursive: true })
-  await writeFile(path.join(shared, 'CLAUDE.md'), 'shared rules\n')
-  const claudeHome = (await getProfile('work', ctx)).claude as string
-  await writeFile(path.join(claudeHome, 'CLAUDE.md'), 'local rules\n')
-  const repaired = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'CLAUDE.md')
-  assert.deepEqual(repaired?.merged, [])
-  assert.equal(await readFile(path.join(shared, 'CLAUDE.md'), 'utf8'), 'shared rules\n')
-  assert.equal(await readFile(path.join(claudeHome, 'CLAUDE.md.backup'), 'utf8'), 'local rules\n')
-  assert.equal(await readFile(path.join(claudeHome, 'CLAUDE.md'), 'utf8'), 'shared rules\n')
-})
-
-test('repairSharedLinks merges directories without overwriting and keeps conflicting entries in the backup', { skip: posixOnly }, async (t) => {
+test('repairSharedLinks moves a replaced directory aside without touching the shared one', { skip: posixOnly }, async (t) => {
   const ctx = await sandboxed(t)
   await addProfile('work', ctx)
   const shared = path.join(ctx.home, '.claude', 'skills')
@@ -488,16 +472,12 @@ test('repairSharedLinks merges directories without overwriting and keeps conflic
   await writeFile(path.join(shared, 'both', 'SKILL.md'), 'shared version')
   const claudeHome = (await getProfile('work', ctx)).claude as string
   const local = path.join(claudeHome, 'skills')
-  await mkdir(path.join(local, 'both'), { recursive: true })
   await mkdir(path.join(local, 'only-local'), { recursive: true })
-  await writeFile(path.join(local, 'both', 'SKILL.md'), 'local version')
   await writeFile(path.join(local, 'only-local', 'SKILL.md'), 'new')
-  await writeFile(path.join(local, '.hidden'), 'dot')
   const repaired = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'skills')
-  assert.deepEqual([...(repaired?.merged ?? [])].sort(), ['.hidden', 'only-local'])
+  assert.equal(existsSync(path.join(shared, 'only-local')), false)
   assert.equal(await readFile(path.join(shared, 'both', 'SKILL.md'), 'utf8'), 'shared version')
-  assert.equal(await readFile(path.join(shared, 'only-local', 'SKILL.md'), 'utf8'), 'new')
-  assert.equal(await readFile(path.join(`${local}.backup`, 'both', 'SKILL.md'), 'utf8'), 'local version')
+  assert.equal(await readFile(path.join(repaired?.backup as string, 'only-local', 'SKILL.md'), 'utf8'), 'new')
   assert.ok(lstatSync(local).isSymbolicLink())
 })
 
@@ -511,8 +491,23 @@ test('repairSharedLinks handles a dir where a file is expected and a file where 
   const repaired = Object.fromEntries((await repairSharedLinks('work', ctx)).map((link) => [link.name, link]))
   assert.equal(repaired['settings.json']?.state, 'linked')
   assert.equal(repaired['skills']?.state, 'linked')
-  assert.equal(await readFile(path.join(claudeHome, 'settings.json.backup', 'inner'), 'utf8'), 'x')
-  assert.equal(await readFile(path.join(claudeHome, 'skills.backup'), 'utf8'), 'not a dir')
+  assert.equal(await readFile(path.join(repaired['settings.json']?.backup as string, 'inner'), 'utf8'), 'x')
+  assert.equal(await readFile(repaired['skills']?.backup as string, 'utf8'), 'not a dir')
+})
+
+test('on Windows a copied file counts as healthy and repair leaves it alone', { skip: process.platform !== 'win32' && 'needs real Windows paths' }, async (t) => {
+  const dir = await realpath(await tempDir(t))
+  const ctx = platformContext({ home: dir, env: { KIT_CONFIG_DIR: path.join(dir, 'cfg') } })
+  await addProfile('work', ctx)
+  const profile = await getProfile('work', ctx)
+  await mkdir(path.join(dir, '.claude'), { recursive: true })
+  await writeFile(path.join(dir, '.claude', 'CLAUDE.md'), 'shared\n')
+  await writeFile(path.join(profile.claude as string, 'CLAUDE.md'), 'copy\n')
+  const inspected = (await inspectSharedLinks('work', ctx)).find((link) => link.name === 'CLAUDE.md')
+  assert.equal(inspected?.state, 'copied')
+  const repaired = (await repairSharedLinks('work', ctx)).find((link) => link.name === 'CLAUDE.md')
+  assert.deepEqual([repaired?.previous, repaired?.state, repaired?.backup], ['copied', 'copied', null])
+  assert.equal(await readFile(path.join(profile.claude as string, 'CLAUDE.md'), 'utf8'), 'copy\n')
 })
 
 test('repairSharedLinks replaces foreign and dangling links, keeps equivalent relative links and leaves their targets alone', { skip: posixOnly }, async (t) => {
@@ -567,82 +562,26 @@ test('repairSharedLinks refuses a missing profile and the first run creates empt
   assert.equal(readFileSync(path.join(ctx.home, '.codex', 'config.toml'), 'utf8'), '')
   assert.ok(statSync(path.join(ctx.home, '.claude', 'skills')).isDirectory())
   const second = await repairSharedLinks('work', ctx)
-  assert.ok(second.every((link) => link.previous === 'linked' && link.merged.length === 0 && link.backup === null))
-  assert.equal(existsSync(path.join((await getProfile('work', ctx)).claude as string, 'settings.json.backup')), false)
+  assert.ok(second.every((link) => link.previous === 'linked' && link.backup === null))
+  assert.deepEqual(backupsOf(path.join((await getProfile('work', ctx)).claude as string, 'settings.json')), [])
 })
 
-test('mergeMissingJson adds only missing keys, recurses into objects and never replaces values', () => {
-  const shared: Record<string, unknown> = { a: 1, o: { x: 1 }, arr: [1], n: null }
-  const added = mergeMissingJson(shared, { a: 2, o: { x: 9, y: 2, deep: { z: 1 } }, arr: [2], n: { was: 'null' }, fresh: { k: 1 }, empty: {} })
-  assert.deepEqual(added, ['o.y', 'o.deep', 'fresh', 'empty'])
-  assert.deepEqual(shared, { a: 1, o: { x: 1, y: 2, deep: { z: 1 } }, arr: [1], n: null, fresh: { k: 1 }, empty: {} })
-  assert.deepEqual(mergeMissingJson({ a: 1 }, {}), [])
+test('concurrent profile changes are serialised by the lock and none is lost', async (t) => {
+  const ctx = await sandboxed(t)
+  const names = Array.from({ length: 8 }, (_, index) => `p${index}`)
+  await Promise.all(names.map((name) => addProfile(name, ctx)))
+  const dirs = names.map((name) => path.join(ctx.home, 'repos', name))
+  for (const dir of dirs) await mkdir(dir, { recursive: true })
+  await Promise.all(dirs.map((dir, index) => mapDir(dir, names[index] as string, ctx)))
+  const listed = await listProfiles(ctx)
+  assert.deepEqual(listed.profiles.map((profile) => profile.name).sort(), ['default', ...names].sort())
+  assert.equal(listed.dirs.length, names.length)
+  assert.equal(existsSync(`${profilesPath(ctx)}.lock`), false)
 })
 
-test('mergeMissingJson keeps local keys named like Object.prototype members', { todo: 'mergeMissingJson uses `key in shared`, which is true for inherited members, so these local keys are dropped silently' }, () => {
-  const shared: Record<string, unknown> = { a: 1 }
-  const added = mergeMissingJson(shared, JSON.parse('{"toString":"x","constructor":{"y":1},"valueOf":2}') as Record<string, unknown>)
-  assert.deepEqual(added.sort(), ['constructor', 'toString', 'valueOf'])
-  assert.equal(Object.hasOwn(shared, 'toString'), true)
-})
-
-test('mergeMissingToml never drops a line of the shared file and is idempotent', () => {
-  const shared = [
-    '# my codex config',
-    'model = "gpt"   # inline comment',
-    '',
-    '[mcp_servers.gaze]',
-    'command = "gaze"',
-    'args = [',
-    '  "mcp",',
-    '  "serve",',
-    ']',
-    '',
-    '[profiles.fast]',
-    'model = "mini"',
-    '',
-  ].join('\n')
-  const local = ['model = "other"', 'approval = "never"', '', '[mcp_servers.gaze]', 'command = "x"', 'env = { A = "1" }', '', '[projects."/work/repo"]', 'trust = "trusted"', ''].join('\n')
-  const first = mergeMissingToml(shared, local)
-  assert.deepEqual(first.added, ['approval', 'mcp_servers.gaze.env', '[projects."/work/repo"]'])
-  const sharedLines = shared.split('\n').filter((line) => line.length > 0)
-  const mergedLines = first.text.split('\n')
-  let cursor = 0
-  for (const line of sharedLines) {
-    cursor = mergedLines.indexOf(line, cursor)
-    assert.notEqual(cursor, -1, `lost or reordered: ${line}`)
-  }
-  assert.ok(first.text.endsWith('\n'))
-  assert.equal(first.text.includes('\n\n\n'), false)
-  assert.deepEqual(mergeMissingToml(first.text, local), { text: first.text, added: [] })
-  assert.deepEqual(mergeMissingToml(shared, ''), { text: shared, added: [] })
-  assert.deepEqual(mergeMissingToml(shared, shared), { text: shared, added: [] })
-})
-
-test('mergeMissingToml treats equivalent headers, quoted keys and CRLF input as the same tables', () => {
-  const sharedText = '[ mcp_servers.gaze ]\r\ncommand = "gaze"\r\n'
-  const localText = '[mcp_servers.gaze]\r\ncommand = "x"\r\nargs = ["mcp"]\r\n\r\n["quoted key"]\r\nv = 1\r\n'
-  const merged = mergeMissingToml(sharedText, localText)
-  assert.deepEqual(merged.added, ['mcp_servers.gaze.args', '["quotedkey"]'])
-  assert.match(merged.text, /command = "gaze"\r\nargs = \["mcp"\]/)
-  assert.equal((merged.text.match(/mcp_servers/g) ?? []).length, 1)
-})
-
-test('mergeMissingToml keeps a table whose quoted name has spaces distinct from its squashed twin', { todo: 'header normalisation strips all whitespace, so ["a b"] and ["ab"] collide and the local table is dropped' }, () => {
-  const merged = mergeMissingToml('["ab"]\nv = 1\n', '["a b"]\nv = 2\n')
-  assert.equal(merged.added.length, 1)
-  assert.match(merged.text, /v = 2/)
-})
-
-test('mergeMissingToml does not mistake bracketed lines inside multi-line values for table headers', { todo: 'parseTomlSections matches any line that looks like [x] as a header, even inside a multi-line array or string' }, () => {
-  const local = ['matrix = [', '  [1, 2],', '  [3, 4]', ']', 'doc = """', '[not-a-table]', '"""', ''].join('\n')
-  const merged = mergeMissingToml('a = 1\n', local)
-  assert.deepEqual(merged.added, ['matrix', 'doc'])
-  assert.equal(merged.text, `a = 1\n${local}`)
-})
-
-test('mergeMissingToml keeps array-of-tables entries that exist only in the local file', { todo: 'when the shared file already has [[x]], every local [[x]] entry is skipped silently and is not reported in `added`' }, () => {
-  const merged = mergeMissingToml('[[hooks]]\nname = "a"\n', '[[hooks]]\nname = "b"\n')
-  assert.match(merged.text, /name = "b"/)
-  assert.deepEqual(merged.added, ['[[hooks]]'])
+test('relative profile directories and a relative KIT_CONFIG_DIR are not accepted', () => {
+  const ctx = platformContext({ platform: 'linux', home: '/h', env: {} })
+  const base = { version: 1, default: 'a', profiles: { a: { builtin: true }, b: { claude: 'rel/claude', codex: '/abs/codex' } } }
+  assert.throws(() => parseProfiles(base, ctx), (error: unknown) => error instanceof ProfileError && error.code === 'PROFILES_INVALID')
+  assert.equal(profilesPath(platformContext({ platform: 'linux', home: '/h', env: { KIT_CONFIG_DIR: 'relative/cfg' } })), '/h/.config/kikedealba/profiles.json')
 })

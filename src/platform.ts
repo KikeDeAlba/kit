@@ -58,7 +58,9 @@ export function toolDirs(tool: string, ctx: PlatformContext = platformContext())
 }
 
 export function kitConfigRoot(ctx: PlatformContext = platformContext()): string {
-  return ctx.env['KIT_CONFIG_DIR'] || pathApi(ctx).join(configHome(ctx), 'kikedealba')
+  const override = ctx.env['KIT_CONFIG_DIR']
+  if (override && pathApi(ctx).isAbsolute(override)) return override
+  return pathApi(ctx).join(configHome(ctx), 'kikedealba')
 }
 
 export function pathDelimiter(ctx: PlatformContext = platformContext()): string {
