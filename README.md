@@ -444,8 +444,8 @@ instala plugins y servidores MCP en el `CLAUDE_CONFIG_DIR` del perfil. Si se pas
 Toda escritura atómica de kit (`writeJsonFile`, `registerTool`, el almacén de
 credenciales en archivo, `profiles.json` y `settings.json`) resuelve antes el
 destino con `realpath` y crea el temporal (con nombre aleatorio) junto al archivo
-real. Un symlink (por ejemplo, `settings.json` de un perfil que apunta a
-`~/.claude/settings.json`) sigue en pie y se actualiza el archivo al que apunta;
+real. Un symlink (por ejemplo, `CLAUDE.md` de un perfil que apunta a
+`~/.claude/CLAUDE.md`) sigue en pie y se actualiza el archivo al que apunta;
 un symlink colgante tampoco se reemplaza: se escribe en su destino. Sin `mode`
 explícito se conserva el modo del archivo que ya existía.
 
@@ -532,8 +532,11 @@ devuelve.
   guarda la ruta ya resuelta con `realpath`.
 - Si el archivo no existe, equivale a un único perfil builtin llamado `default`.
   No se crea hasta la primera escritura. Se escribe de forma atómica con modo
-  `0600`, y `profiles/<n>/`, `claude/` y `codex/` se crean con `0700`.
-- Un archivo inválido lanza `ProfileError` con código `PROFILES_INVALID`.
+  `0600`; la raíz de configuración (`kikedealba/` o `KIT_CONFIG_DIR`),
+  `profiles/<n>/`, `claude/` y `codex/` se crean con `0700`.
+- Un archivo inválido lanza `ProfileError` con código `PROFILES_INVALID`. También
+  lo es un perfil cuyo `claude` o `codex` sea `~/.claude` o `~/.codex`, o que
+  repita la carpeta de otro perfil (o la suya entre `claude` y `codex`).
 
 ```ts
 import { profiles } from '@kikedealba/kit'
@@ -554,10 +557,19 @@ silencio al default.
    `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `GEMINI_CLI`,
    `OPENCODE`, `ANTIGRAVITY_*` de sesión, etc.).
 2. Siempre quita `CLAUDE_CONFIG_DIR` y `CODEX_HOME` heredados.
-3. En un perfil no builtin, para cualquier harness, quita las credenciales de la
-   shell sin importar mayúsculas: todo `ANTHROPIC_*`, `OPENAI_*`,
-   `AWS_BEARER_*` y `CLAUDE_CODE_USE_*`, más `CLAUDE_CODE_OAUTH_TOKEN`,
-   `CODEX_API_KEY`, `GEMINI_API_KEY` y `GOOGLE_API_KEY`. El builtin las conserva.
+3. En un perfil no builtin, con `claude`, `codex` o `all`, quita solo las
+   credenciales de la cuenta del agente, sin importar mayúsculas: los prefijos de
+   `PROFILE_SECRET_ENV_PREFIXES` (`ANTHROPIC_*`, que incluye `ANTHROPIC_VERTEX_*`,
+   `OPENAI_*`, `AZURE_OPENAI_*`, `CLAUDE_CODE_USE_*`, `CLAUDE_CODE_OAUTH_*`,
+   `CLAUDE_CODE_API_KEY*` y `GOOGLE_GENAI_*`) y los nombres de
+   `PROFILE_SECRET_ENV` (`AWS_BEARER_TOKEN_BEDROCK`, `CODEX_API_KEY`,
+   `CODEX_ACCESS_TOKEN`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` y
+   `CLOUD_ML_REGION`). `isProfileSecretEnv(nombre)` aplica la misma regla. No hay
+   patrones por subcadena: `GITHUB_TOKEN`, `NPM_TOKEN`, `AWS_ACCESS_KEY_ID`,
+   `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` o `AWS_PROFILE` pasan, porque la
+   sesión los necesita para trabajar. El builtin las conserva, y con `gemini`,
+   `opencode` o `antigravity` también (esos agentes no cambian de cuenta con el
+   perfil).
 4. En un perfil no builtin define `CLAUDE_CONFIG_DIR` (con `claude` o `all`) y
    `CODEX_HOME` (con `codex` o `all`).
 5. Siempre define un único `DEN_PROFILE` (quita antes cualquier variante con
@@ -573,31 +585,65 @@ ser absolutas: una ruta de perfil relativa es `PROFILES_INVALID` y un
 |---|---|
 | `listProfiles()` / `getProfile(n)` | Lee el archivo |
 | `addProfile(n)` | Registra el perfil y crea sus carpetas con `0700`. Idempotente: `created: false` si ya existía |
-| `removeProfile(n, { purge })` | Falla con `PROFILE_BUILTIN` o `PROFILE_IS_DEFAULT`; quita sus `dirs` y solo borra la carpeta con `purge` |
+| `removeProfile(n, { purge })` | Falla con `PROFILE_BUILTIN` o `PROFILE_IS_DEFAULT`; quita sus `dirs` y solo borra la carpeta con `purge`. Devuelve `{ removed, purged, unmapped, logoutRequired }` |
 | `setDefaultProfile(n)` | Cambia el default |
 | `renameBuiltinProfile(n)` | Da nombre al perfil builtin (el asistente de den usa `personal`) |
 | `mapDir(dir, n)` / `unmapDir(dir)` | Asocia o suelta un directorio |
 | `profileHomes(n)` | `{ root, claude, codex }` bajo `<raíz>/profiles/<n>` |
-| `inspectSharedLinks(n)` / `repairSharedLinks(n)` | Revisa y repara los enlaces compartidos |
+| `inspectSharedLinks(n)` / `repairSharedLinks(n)` | Revisa y repara los enlaces y copias compartidos |
+| `syncSharedCopies(n)` | Regenera las copias filtradas que faltan o quedaron viejas; no toca una editada |
 | `authStatus(perfil)` | Corre `claude auth status --json` con el entorno del perfil |
 
-Enlaces compartidos. Un perfil comparte con `~/.claude` y `~/.codex`:
-`CLAUDE.md`, `settings.json`, `skills/`, `agents/`, `commands/`, `AGENTS.md` y
-`config.toml`. Nunca se enlazan `plugins/`, `projects/`, `.claude.json`,
-`.credentials.json`, `todos/`, `auth.json`, `sessions/` ni `history.jsonl`.
-`inspectSharedLinks` da el estado de cada enlace: `linked`, `copied` (en
-Windows, donde los archivos se copian en vez de enlazarse; cuenta como sano),
-`missing`, `foreign` (symlink a otro lado) o `replaced` (Claude Code o Codex lo
-cambió por un archivo propio). `HEALTHY_LINK_STATES` lista los estados sanos.
-`repairSharedLinks` no fusiona nada:
+Enlaces compartidos. Un perfil enlaza con `~/.claude` y `~/.codex`:
+`CLAUDE.md`, `skills/`, `agents/`, `commands/` y `AGENTS.md` (`SHARED_LINKS`).
+Nunca se enlazan `plugins/`, `projects/`, `.claude.json`, `.credentials.json`,
+`todos/`, `auth.json`, `sessions/` ni `history.jsonl`. `config.toml` de Codex
+**ya no se comparte**: cada perfil tiene el suyo, porque no hay un parser TOML
+fiable para filtrarlo.
 
-1. Crea el destino compartido si falta (`{}` para `settings.json`, vacío para
-   los demás archivos, carpeta para los directorios). Nunca reescribe uno que ya
-   existe.
-2. Si el enlace fue reemplazado, mueve la copia del perfil a
-   `<nombre>.backup-<timestamp>` (copia y borra si está en otro volumen) y
-   devuelve esa ruta en `backup`, para que `den doctor` la muestre.
-3. Quita un enlace `foreign` y vuelve a enlazar. Los estados sanos no se tocan.
+`settings.json` de Claude no es un symlink sino una copia filtrada
+(`SHARED_COPIES`): kit escribe `<perfil>/claude/settings.json` desde
+`~/.claude/settings.json` sin `apiKeyHelper`, `awsCredentialExport`,
+`awsAuthRefresh` ni `otelHeadersHelper`, y sin las claves de `env` que cumplen
+`isProfileSecretEnv` (`filterSharedClaudeSettings` hace ese filtro). El hash de
+lo escrito queda en `<perfil>/claude/.den-shared.json`, fuera del settings. Si
+el compartido no existe, la copia es `{}`; si no es un objeto JSON válido, lanza
+`SHARED_COPY_INVALID`.
+
+`inspectSharedLinks` da el estado de cada entrada:
+
+| Estado | Qué significa | Sano |
+|---|---|---|
+| `linked` | symlink al compartido | sí |
+| `copied` | en Windows, archivo copiado en vez de enlazado | sí |
+| `generated` | copia filtrada al día | sí |
+| `missing` | no existe | no |
+| `foreign` | symlink a otro lado (también un `settings.json` enlazado de versiones anteriores) | no |
+| `replaced` | Claude Code o Codex lo cambió por algo propio | no |
+| `stale` | el compartido cambió desde la última copia: hay que regenerar | no |
+| `drifted` | el perfil editó su copia | no |
+
+`HEALTHY_LINK_STATES` lista los sanos. `syncSharedCopies(n)` regenera las copias
+`missing`, `stale` o `foreign` y deja una `drifted` como está; den y nursery la
+llaman tras cambiar el compartido. `repairSharedLinks` no fusiona nada:
+
+1. Crea el destino compartido de un enlace si falta (vacío para archivos,
+   carpeta para directorios). Nunca reescribe uno que ya existe.
+2. Si un enlace fue reemplazado o una copia está `drifted` o `replaced`, mueve
+   lo del perfil a `<nombre>.backup-<timestamp>` (copia y borra si está en otro
+   volumen) y devuelve esa ruta en `backup`, para que `den doctor` la muestre.
+3. Quita un enlace `foreign`, vuelve a enlazar y regenera las copias. Los estados
+   sanos no se tocan.
+
+Si el home `claude` o `codex` de un perfil resuelve (por ejemplo, con un
+symlink) al home compartido, `inspectSharedLinks`, `syncSharedCopies` y
+`repairSharedLinks` lanzan `PROFILE_HOME_SHARED` sin mover nada.
+
+`removeProfile(n, { purge: true })` borra la carpeta del perfil pero no puede
+borrar la entrada del Llavero de macOS sin `claude`: devuelve
+`logoutRequired: true` cuando el perfil tenía home de Claude. Den corre
+`claude auth logout` con `envFor(perfil, 'claude', …)` antes de llamar a
+`removeProfile` con `purge`.
 
 `authStatus` devuelve `{ loggedIn, authMethod, email, orgName,
 subscriptionType, configDirectory }`, o `null` si `claude` no está o no responde
@@ -619,15 +665,15 @@ por namespace:
 |---|---|---|---|---|
 | `agents.maxParallel` | integer | 10 | nursery | 1–20 |
 | `agents.enabled` | string[] | los 10 roles más los agentes de usuario | nursery | roles conocidos, no vacío |
-| `agents.<role>.model` | string | el del frontmatter de origen | nursery | `^[a-z0-9.\-\[\]]+$` |
+| `agents.<role>.model` | string | el del frontmatter de origen | nursery | `MODEL_PATTERN`: `^[a-z0-9][a-z0-9.\-\[\]/#:]*$` |
 | `agents.<role>.maxTurns` | integer | el del frontmatter | nursery | 1–500 |
 | `agents.<role>.effort` | enum | el del frontmatter | nursery | `low`, `medium`, `high`, `xhigh`, `max` |
 | `rules.noAiTrace`, `noComments`, `language`, `worktrees`, `gitflow`, `delegation` | boolean | true | nursery | — |
 | `rules.baseBranch` | string | `develop` | nursery | nombre de rama git válido, solo `[A-Za-z0-9._/-]` |
 | `harness.default` | enum | `claude` | den | `HARNESS_IDS` |
 | `harness.<h>.skipPermissions` | boolean | true | den | — |
-| `harness.<h>.extraArgs` | string[] | [] | den | sin `--` |
-| `session.summary.<h>.model` | string | `defaultSummaryModel` del adaptador | bita | no vacío |
+| `harness.<h>.extraArgs` | string[] | [] | den | sin `--`, sin saltos de línea ni NUL; por lo demás libre (es config del propio usuario) |
+| `session.summary.<h>.model` | string | `defaultSummaryModel` del adaptador | bita | `MODEL_PATTERN` |
 | `session.minDurationSec` | integer | 60 | bita | 0–3600 |
 | `tools.<t>.enabled` | boolean | true | den | `kit` no se puede apagar |
 
@@ -682,7 +728,16 @@ const turns = await adapter.extractTranscript({ ...ref, profile: 'trabajo' }, ba
   extraArgs: [] }`. `launchOptionsFor(id)` las lee de `harness.<id>.*`.
 - `extractTranscript(ref, baseEnv?)` y `summarize({ …, profile, baseEnv? })`
   calculan su entorno con `harnessEnv(id, profile, baseEnv)`: quitan las
-  variables de sesión y, si hay perfil, aplican `envFor`. Un perfil que ya no
+  variables de sesión y, si hay perfil, aplican `envFor`. Sin perfil
+  (`null` o `undefined`) se comportan como el perfil builtin: quitan
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME` y `DEN_PROFILE` heredados y no definen
+  ninguno.
+- Claude y Codex solo leen transcripciones dentro de `projects/` y `sessions/`
+  del home del perfil: el `sessionId` debe cumplir `^[\w-]+$` y el `realpath`
+  del archivo (también el de un `transcriptPath` explícito) debe quedar ahí
+  dentro; si no, devuelven `[]`.
+- El resumen de opencode corre con `--agent plan` (solo lectura), igual que
+  headless. Un perfil que ya no
   existe hace que `summarize` devuelva `{ ok: false }`; un nombre vacío se
   rechaza. **Cambio respecto a bita 1.9:** sin `baseEnv`, los adaptadores parten
   de `process.env` sin las variables de sesión, pero ya no ponen `BITA_CHILD` ni
