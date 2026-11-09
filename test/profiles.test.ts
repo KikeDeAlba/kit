@@ -168,7 +168,11 @@ test('KIT_CONFIG_DIR replaces the whole config root', async (t) => {
   const ctx = await home(t)
   const custom = platformContext({ ...ctx, env: { ...ctx.env, KIT_CONFIG_DIR: path.join(ctx.home, 'custom') } })
   assert.equal(profilesPath(custom), path.join(ctx.home, 'custom', 'profiles.json'))
-  assert.equal(profilesPath(ctx), path.join(ctx.home, '.config', 'kikedealba', 'profiles.json'))
+  const defaultRoot = ctx.platform === 'win32' ? path.join(ctx.home, 'AppData', 'Roaming') : path.join(ctx.home, '.config')
+  assert.equal(profilesPath(ctx), path.join(defaultRoot, 'kikedealba', 'profiles.json'))
+  const win = platformContext({ platform: 'win32', home: 'C:\\Users\\me', env: { APPDATA: 'C:\\Users\\me\\AppData\\Roaming', KIT_CONFIG_DIR: 'D:\\cfg' } })
+  assert.equal(profilesPath(win), 'D:\\cfg\\profiles.json')
+  assert.equal(profilesPath({ ...win, env: { APPDATA: win.env['APPDATA'] } }), 'C:\\Users\\me\\AppData\\Roaming\\kikedealba\\profiles.json')
 })
 
 test('addProfile registers once, creates private dirs and stores ~ paths with mode 0600', { skip: posixOnly }, async (t) => {
@@ -211,7 +215,8 @@ test('removeProfile refuses the builtin and the default, unmaps dirs and purges 
 })
 
 test('logoutRequired is only reported on macOS, where the Keychain keeps the login', async (t) => {
-  for (const platform of ['darwin', 'linux'] as const) {
+  const platforms = process.platform === 'win32' ? (['win32'] as const) : (['darwin', 'linux'] as const)
+  for (const platform of platforms) {
     const base = await home(t)
     const ctx = platformContext({ platform, home: base.home, env: base.env })
     await addProfile('work', ctx)
