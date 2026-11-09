@@ -149,8 +149,12 @@ test('enum, string and model settings validate their shape', async (t) => {
   for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) assert.equal((await setSetting('agents.developer.effort', effort, ctx)).value, effort)
   for (const bad of ['HIGH', 'ultra', '', ' high', 'high ']) await assert.rejects(setSetting('agents.developer.effort', bad, ctx), code('INVALID_VALUE'), bad)
   await assert.rejects(setSetting('agents.developer.effort', 3 as unknown as string, ctx), code('INVALID_VALUE'))
-  for (const good of ['sonnet', 'claude-opus-4-7', 'claude-opus-4-7[1m]', 'gpt-5.1', 'a']) assert.equal((await setSetting('agents.developer.model', good, ctx)).value, good)
-  for (const bad of ['Opus', 'my model', 'm/n', 'm_n', '', '   ', 'ñ']) await assert.rejects(setSetting('agents.developer.model', bad, ctx), code('INVALID_VALUE'), JSON.stringify(bad))
+  const goodModels = ['sonnet', 'claude-opus-4-7', 'claude-opus-4-7[1m]', 'gpt-5.1', 'a', 'openai/gpt-5.6-luna', 'ollama:llama3#q4', '9b']
+  const badModels = ['Opus', 'my model', 'm_n', '', '   ', 'ñ', '-x', '.x', '/x', '[1m]', 'a;b', 'a\nb', 'a$b', 'a`b']
+  for (const key of ['agents.developer.model', 'session.summary.claude.model', 'session.summary.opencode.model']) {
+    for (const good of goodModels) assert.equal((await setSetting(key, good, ctx)).value, good, `${key}=${good}`)
+    for (const bad of badModels) await assert.rejects(setSetting(key, bad, ctx), code('INVALID_VALUE'), `${key}=${JSON.stringify(bad)}`)
+  }
   await assert.rejects(setSetting('session.summary.claude.model', '   ', ctx), code('INVALID_VALUE'))
   await assert.rejects(setSetting('session.summary.claude.model', ['a'] as unknown as string, ctx), code('INVALID_VALUE'))
   await assert.rejects(setSetting('rules.gitflow', 'maybe', ctx), code('INVALID_VALUE'))
@@ -158,6 +162,8 @@ test('enum, string and model settings validate their shape', async (t) => {
   assert.deepEqual((await setSetting('harness.claude.extraArgs', 'a,b', ctx)).value, ['a', 'b'])
   await assert.rejects(setSetting('harness.claude.extraArgs', ['ok', 3] as unknown as string[], ctx), code('INVALID_VALUE'))
   await assert.rejects(setSetting('harness.claude.extraArgs', ['ok', '--'], ctx), code('INVALID_VALUE'))
+  for (const bad of ['a\nb', 'a\rb', 'a\0b']) await assert.rejects(setSetting('harness.claude.extraArgs', ['ok', bad], ctx), code('INVALID_VALUE'), JSON.stringify(bad))
+  assert.deepEqual((await setSetting('harness.claude.extraArgs', ['--append-system-prompt', 'free text; with $symbols'], ctx)).value, ['--append-system-prompt', 'free text; with $symbols'])
   assert.deepEqual((await setSetting('harness.claude.extraArgs', ['--model=x', '-p'], ctx)).value, ['--model=x', '-p'])
 })
 
@@ -377,4 +383,11 @@ test('listSettings gives unique keys for every pattern and marks only stored val
 test('branch names are limited to characters that are safe inside a markdown table', () => {
   for (const name of ['feature/x', 'release/1.2.0', 'Dev_2', 'a-b.c']) assert.equal(isValidBranchName(name), true, name)
   for (const name of ['a|b', 'a`b', 'a$b', 'a;b', 'rama-ñ', 'a"b', "a'b", 'a<b', 'a>b', 'a&b', 'a(b)', 'a#b', 'a%b', 'a!b', 'a,b', 'a=b', 'a+b']) assert.equal(isValidBranchName(name), false, name)
+})
+
+test('the config dir is created owner-only by the first settings write', { skip: posixOnly }, async (t) => {
+  const ctx = await sandboxed(t)
+  await setSetting('rules.baseBranch', 'main', ctx)
+  assert.equal(statSync(path.dirname(settingsPath(ctx))).mode & 0o777, 0o700)
+  assert.equal(statSync(settingsPath(ctx)).mode & 0o777, 0o600)
 })
