@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { chmodSync, lstatSync, readdirSync, readlinkSync, statSync } from 'node:fs'
 import { mkdir, readFile, symlink, utimes, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -122,4 +123,45 @@ test('withFileLock serialises writers and replaces a lock left by a dead process
   await writeFile(`${file}.lock`, `${process.pid}\n`)
   await assert.rejects(withFileLock(file, async () => 'never', { timeoutMs: 100 }), /timed out waiting for the lock/)
   assert.equal(await readFile(`${file}.lock`, 'utf8'), `${process.pid}\n`)
+})
+
+test('withFileLock excludes real concurrent processes', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'counter.txt')
+  await writeFile(file, '0')
+  const script = path.join(import.meta.dirname, 'fixtures', 'lock', 'counter.ts')
+  const processes = 10
+  const rounds = 25
+  await Promise.all(Array.from({ length: processes }, () => new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, [script, file, String(rounds)], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()))
+    child.once('error', reject)
+    child.once('close', (code) => (code === 0 ? resolve() : reject(new Error(`counter exited with ${code}: ${stderr}`))))
+  })))
+  assert.equal(await readFile(file, 'utf8'), String(processes * rounds))
+  assert.deepEqual(readdirSync(dir), ['counter.txt'])
+})
+
+test('withFileLock on a dangling symlink creates the directory of the resolved target', { skip: posixOnly }, async (t) => {
+  const dir = await tempDir(t)
+  const link = path.join(dir, 'link.json')
+  const target = path.join(dir, 'deep', 'er', 'real.json')
+  await symlink(target, link)
+  assert.equal(await withFileLock(link, async () => {
+    await writeFileAtomic(link, '{}')
+    return 'done'
+  }), 'done')
+  assert.equal(await readFile(target, 'utf8'), '{}')
+  assert.ok(lstatSync(link).isSymbolicLink())
+  assert.deepEqual(readdirSync(path.dirname(target)), ['real.json'])
+})
+
+test('a lock is only released by its owner', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'data.json')
+  await withFileLock(file, async () => {
+    await writeFile(`${file}.lock`, 'someone else\n')
+  })
+  assert.equal(await readFile(`${file}.lock`, 'utf8'), 'someone else\n')
 })
