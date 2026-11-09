@@ -1,0 +1,23 @@
+{
+  "info": {
+    "id": "ses_fixture0001",
+    "title": "Fixture",
+    "location": { "directory": "/work/bita-cli" },
+    "time": { "created": 1792483200000, "updated": 1792483260000 }
+  },
+  "messages": [
+    { "id": "m0", "type": "synthetic", "text": "system bootstrap", "time": { "created": 1792483200000 } },
+    { "id": "m1", "type": "user", "text": "Documenta el comando session", "agents": [], "files": [], "time": { "created": 1792483201000 } },
+    {
+      "id": "m2",
+      "type": "assistant",
+      "content": [
+        { "type": "reasoning", "text": "hidden reasoning" },
+        { "type": "tool", "id": "t1", "name": "read", "state": { "status": "completed" } },
+        { "type": "text", "text": "Agregué la sección al README." }
+      ],
+      "time": { "created": 1792483202000 }
+    },
+    { "id": "m3", "type": "user", "text": "  ", "agents": [], "files": [], "time": { "created": 1792483203000 } }
+  ]
+}

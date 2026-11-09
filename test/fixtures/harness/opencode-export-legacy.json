@@ -1,0 +1,1 @@
+{"info":{"id":"ses_legacy"},"messages":[{"info":{"role":"user","id":"a"},"parts":[{"type":"text","text":"Hola legacy"},{"type":"text","text":"synthetic part","synthetic":true}]},{"info":{"role":"assistant","id":"b"},"parts":[{"type":"step-start"},{"type":"text","text":"Respuesta legacy"}]}]}
