@@ -1,7 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { parseFrontmatter } from './agents/markdown.ts'
-import { writeFileAtomic } from './atomic.ts'
+import { withFileLock, writeFileAtomic } from './atomic.ts'
 import { CATALOG, CATALOG_TOOL_NAMES, catalogTool } from './catalog.ts'
 import { HARNESS_IDS, type HarnessId } from './harness/types.ts'
 import { kitConfigRoot, platformContext, type PlatformContext } from './platform.ts'
@@ -35,6 +35,7 @@ export interface SettingChange {
   previous: SettingValue | undefined
   value: SettingValue | undefined
   refresh: SettingDef['refresh']
+  warnings?: string[]
 }
 
 export type SettingsErrorCode = 'SETTINGS_INVALID' | 'UNKNOWN_KEY' | 'INVALID_VALUE'
@@ -71,8 +72,12 @@ export const USER_AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,39}$/
 const MODEL_PATTERN = /^[a-z0-9.\-[\]]+$/
 const RESERVED_ROLE_NAMES = new Set(['enabled'])
 
+function pathApi(ctx: PlatformContext): path.PlatformPath {
+  return ctx.platform === 'win32' ? path.win32 : path.posix
+}
+
 export function userAgentsDir(ctx: PlatformContext = platformContext()): string {
-  return path.join(kitConfigRoot(ctx), 'agents')
+  return pathApi(ctx).join(kitConfigRoot(ctx), 'agents')
 }
 
 export async function listUserAgents(ctx: PlatformContext = platformContext()): Promise<string[]> {
@@ -98,7 +103,7 @@ function frontmatterDefault(field: 'model' | 'maxTurns' | 'effort'): (key: strin
     if ((NURSERY_ROLES as readonly string[]).includes(role)) return undefined
     let text: string
     try {
-      text = await readFile(path.join(userAgentsDir(ctx), `${role}.md`), 'utf8')
+      text = await readFile(pathApi(ctx).join(userAgentsDir(ctx), `${role}.md`), 'utf8')
     } catch {
       return undefined
     }
@@ -131,7 +136,7 @@ export const SETTING_DEFS: readonly SettingDef[] = [
 ]
 
 export function settingsPath(ctx: PlatformContext = platformContext()): string {
-  return path.join(kitConfigRoot(ctx), 'settings.json')
+  return pathApi(ctx).join(kitConfigRoot(ctx), 'settings.json')
 }
 
 interface KeyMatch {
@@ -444,35 +449,44 @@ export function onChange(prefix: string, handler: ChangeHandler): () => void {
   }
 }
 
-async function notify(change: SettingChange): Promise<void> {
-  for (const { prefix, handler } of [...handlers]) {
-    if (prefix === '' || change.key === prefix || change.key.startsWith(prefix.endsWith('.') ? prefix : `${prefix}.`)) await handler(change)
+async function notify(change: SettingChange): Promise<SettingChange> {
+  const matching = [...handlers].filter(({ prefix }) => prefix === '' || change.key === prefix || change.key.startsWith(prefix.endsWith('.') ? prefix : `${prefix}.`))
+  const warnings: string[] = []
+  for (const { handler } of matching) {
+    try {
+      await handler({ ...change })
+    } catch (error) {
+      warnings.push(`onChange handler for ${change.key} failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
+  return warnings.length > 0 ? { ...change, warnings } : change
 }
 
 export async function setSetting(key: string, value: SettingValue | string, ctx: PlatformContext = platformContext()): Promise<SettingChange> {
   const match = await resolveKey(key, ctx)
   const parsed = typeof value === 'string' && match.def.type !== 'string' && match.def.type !== 'enum' ? parseRaw(key, match.def, value) : value
   const checked = await checkValueAsync(key, match, parsed, ctx)
-  const tree = await readTree(ctx)
-  const before = await entryFor(tree, key, match, ctx)
-  if (sameValue(checked, before.default)) deleteNested(tree, key)
-  else setNested(tree, key, checked)
-  await writeTree(tree, ctx)
-  const change: SettingChange = { key, previous: before.value, value: checked, refresh: match.def.refresh }
-  if (!sameValue(change.previous, change.value)) await notify(change)
-  return change
+  const change = await withFileLock(settingsPath(ctx), async (): Promise<SettingChange> => {
+    const tree = await readTree(ctx)
+    const before = await entryFor(tree, key, match, ctx)
+    if (sameValue(checked, before.default)) deleteNested(tree, key)
+    else setNested(tree, key, checked)
+    await writeTree(tree, ctx)
+    return { key, previous: before.value, value: checked, refresh: match.def.refresh }
+  })
+  return sameValue(change.previous, change.value) ? change : notify(change)
 }
 
 export async function unsetSetting(key: string, ctx: PlatformContext = platformContext()): Promise<SettingChange> {
   const match = await resolveKey(key, ctx)
-  const tree = await readTree(ctx)
-  const before = await entryFor(tree, key, match, ctx)
-  if (getNested(tree, key) !== undefined) {
-    deleteNested(tree, key)
-    await writeTree(tree, ctx)
-  }
-  const change: SettingChange = { key, previous: before.value, value: before.default, refresh: match.def.refresh }
-  if (!sameValue(change.previous, change.value)) await notify(change)
-  return change
+  const change = await withFileLock(settingsPath(ctx), async (): Promise<SettingChange> => {
+    const tree = await readTree(ctx)
+    const before = await entryFor(tree, key, match, ctx)
+    if (getNested(tree, key) !== undefined) {
+      deleteNested(tree, key)
+      await writeTree(tree, ctx)
+    }
+    return { key, previous: before.value, value: before.default, refresh: match.def.refresh }
+  })
+  return sameValue(change.previous, change.value) ? change : notify(change)
 }

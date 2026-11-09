@@ -302,7 +302,7 @@ test('onChange handlers see one change per real change, in order, and can be rem
   assert.deepEqual(order, ['a:rules.gitflow', 'b:rules.gitflow', 'a:rules.gitflow', 'b:rules.gitflow'])
 })
 
-test('a failing onChange handler does not turn a persisted change into a failure nor starve later handlers', { todo: 'notify awaits handlers in sequence without isolation: a throwing handler rejects setSetting after the file was written and skips the rest' }, async (t) => {
+test('a failing onChange handler does not turn a persisted change into a failure nor starve later handlers', async (t) => {
   const ctx = await sandboxed(t)
   const seen: SettingChange[] = []
   const stopBad = onChange('rules', () => {
@@ -326,14 +326,15 @@ test('a failing onChange handler still leaves the new value on disk', async (t) 
     throw new Error('handler exploded')
   })
   try {
-    await assert.rejects(setSetting('rules.gitflow', false, ctx), /handler exploded/)
+    const change = await setSetting('rules.gitflow', false, ctx)
+    assert.deepEqual(change.warnings, ['onChange handler for rules.gitflow failed: handler exploded'])
   } finally {
     stop()
   }
   assert.equal(await getSetting('rules.gitflow', ctx), false)
 })
 
-test('parallel setSetting calls on different keys keep every value', { todo: 'read-modify-write without a lock plus a shared temporary name: concurrent writers lose updates or fail with ENOENT' }, async (t) => {
+test('parallel setSetting calls on different keys keep every value', async (t) => {
   const ctx = await sandboxed(t)
   const writes: [string, number | boolean][] = [
     ['agents.maxParallel', 3],
@@ -347,7 +348,7 @@ test('parallel setSetting calls on different keys keep every value', { todo: 're
   for (const [key, value] of writes) assert.equal(await getSetting(key, ctx), value, key)
 })
 
-test('settingsPath and the user agents dir follow the platform path style', { todo: 'settingsPath and userAgentsDir use the host path module instead of the one for ctx.platform, unlike profilesPath' }, () => {
+test('settingsPath and the user agents dir follow the platform path style', () => {
   const win = platformContext({ platform: 'win32', home: 'C:\\Users\\me', env: { APPDATA: 'C:\\Users\\me\\AppData\\Roaming' } })
   assert.equal(settingsPath(win), 'C:\\Users\\me\\AppData\\Roaming\\kikedealba\\settings.json')
   assert.equal(userAgentsDir(win), 'C:\\Users\\me\\AppData\\Roaming\\kikedealba\\agents')
