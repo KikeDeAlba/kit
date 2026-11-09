@@ -1,16 +1,14 @@
 import assert from 'node:assert/strict'
 import { chmodSync, lstatSync, readdirSync, readlinkSync, statSync } from 'node:fs'
-import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, symlink, utimes, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { test } from 'node:test'
-import { resolveWriteTarget, writeFileAtomic } from '../src/atomic.ts'
+import { resolveWriteTarget, withFileLock, writeFileAtomic } from '../src/atomic.ts'
 import { tempDir } from './helpers.ts'
 
 const posixOnly = process.platform === 'win32' ? 'symlinks and modes need POSIX' : false
 
-const collision = 'the temporary name is .<file>.<pid>.<Date.now()>.tmp, so writes started in the same millisecond share it and all but one fail with ENOENT on rename'
-
-test('concurrent atomic writes to the same file all succeed and leave one complete value', { todo: collision }, async (t) => {
+test('concurrent atomic writes to the same file all succeed and leave one complete value', async (t) => {
   const dir = await tempDir(t)
   const file = path.join(dir, 'settings.json')
   const values = Array.from({ length: 40 }, (_, index) => `${JSON.stringify({ writer: index, pad: 'x'.repeat(2000) })}\n`)
@@ -20,7 +18,7 @@ test('concurrent atomic writes to the same file all succeed and leave one comple
   assert.deepEqual(readdirSync(dir), ['settings.json'])
 })
 
-test('concurrent atomic writes through a symlink all succeed and keep the link', { skip: posixOnly, todo: collision }, async (t) => {
+test('concurrent atomic writes through a symlink all succeed and keep the link', { skip: posixOnly }, async (t) => {
   const dir = await tempDir(t)
   const real = path.join(dir, 'real.json')
   const link = path.join(dir, 'link.json')
@@ -62,7 +60,7 @@ test('writeFileAtomic applies the mode to the file behind the link, not to the l
   assert.ok(lstatSync(path.join(dir, 'link.json')).isSymbolicLink())
 })
 
-test('writeFileAtomic keeps the mode of an existing file when none is requested', { skip: posixOnly, todo: 'the temporary file takes the default mode and is renamed over the original, so a 0600 file silently becomes 0644' }, async (t) => {
+test('writeFileAtomic keeps the mode of an existing file when none is requested', { skip: posixOnly }, async (t) => {
   const dir = await tempDir(t)
   const file = path.join(dir, 'settings.json')
   await writeFile(file, '{}', { mode: 0o600 })
@@ -76,7 +74,7 @@ test('writeFileAtomic keeps the mode of an existing file when none is requested'
   assert.equal(statSync(file).mode & 0o777, 0o600)
 })
 
-test('writeFileAtomic does not replace a dangling symlink with a regular file', { skip: posixOnly, todo: 'realpath fails for a dangling link, so the link itself is the rename target and is replaced, leaving the intended destination missing' }, async (t) => {
+test('writeFileAtomic does not replace a dangling symlink with a regular file', { skip: posixOnly }, async (t) => {
   const dir = await tempDir(t)
   const link = path.join(dir, 'link.json')
   const missing = path.join(dir, 'missing.json')
@@ -101,4 +99,27 @@ test('writeFileAtomic creates missing parents, honours dirMode and writes empty 
   assert.equal(await readFile(file, 'utf8'), '')
   assert.equal(statSync(path.dirname(file)).mode & 0o777, 0o700)
   assert.equal(statSync(file).mode & 0o777, 0o600)
+})
+
+test('withFileLock serialises writers and replaces a lock left by a dead process or too old', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'data.json')
+  await writeFile(file, '0')
+  await Promise.all(Array.from({ length: 20 }, () => withFileLock(file, async () => {
+    const value = Number(await readFile(file, 'utf8'))
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    await writeFileAtomic(file, String(value + 1))
+  })))
+  assert.equal(await readFile(file, 'utf8'), '20')
+  assert.deepEqual(readdirSync(dir), ['data.json'])
+
+  await writeFile(`${file}.lock`, '999999999\n')
+  assert.equal(await withFileLock(file, async () => 'dead owner', { timeoutMs: 500 }), 'dead owner')
+  await writeFile(`${file}.lock`, `${process.pid}\n`)
+  const old = new Date(Date.now() - 60_000)
+  await utimes(`${file}.lock`, old, old)
+  assert.equal(await withFileLock(file, async () => 'old lock', { timeoutMs: 500 }), 'old lock')
+  await writeFile(`${file}.lock`, `${process.pid}\n`)
+  await assert.rejects(withFileLock(file, async () => 'never', { timeoutMs: 100 }), /timed out waiting for the lock/)
+  assert.equal(await readFile(`${file}.lock`, 'utf8'), `${process.pid}\n`)
 })
