@@ -191,10 +191,12 @@ async function resolveKey(key: string, ctx: PlatformContext): Promise<KeyMatch> 
   return match
 }
 
+const BRANCH_NAME_CHARS = /^[A-Za-z0-9._/-]+$/
 const GIT_REF_FORBIDDEN = /[\s~^:?*[\\\x00-\x1f\x7f]/
 
 export function isValidBranchName(name: string): boolean {
   if (name.length === 0 || name === '@') return false
+  if (!BRANCH_NAME_CHARS.test(name)) return false
   if (GIT_REF_FORBIDDEN.test(name)) return false
   if (name.startsWith('-') || name.startsWith('/') || name.endsWith('/') || name.endsWith('.')) return false
   if (name.includes('..') || name.includes('//') || name.includes('@{')) return false

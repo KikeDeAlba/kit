@@ -21,6 +21,7 @@ import {
   unsetSetting,
   userAgentsDir,
   type SettingChange,
+  isValidBranchName,
 } from '../src/settings.ts'
 import { tempDir } from './helpers.ts'
 
@@ -371,4 +372,9 @@ test('listSettings gives unique keys for every pattern and marks only stored val
   const patterns = new Set(SETTING_DEFS.map((def) => def.pattern))
   assert.equal(patterns.size, SETTING_DEFS.length)
   assert.equal(keys.length, 1 + 1 + 3 * 10 + 6 + 1 + 1 + 2 * HARNESS_IDS.length + HARNESS_IDS.length + 1 + CATALOG.length)
+})
+
+test('branch names are limited to characters that are safe inside a markdown table', () => {
+  for (const name of ['feature/x', 'release/1.2.0', 'Dev_2', 'a-b.c']) assert.equal(isValidBranchName(name), true, name)
+  for (const name of ['a|b', 'a`b', 'a$b', 'a;b', 'rama-ñ', 'a"b', "a'b", 'a<b', 'a>b', 'a&b', 'a(b)', 'a#b', 'a%b', 'a!b', 'a,b', 'a=b', 'a+b']) assert.equal(isValidBranchName(name), false, name)
 })
