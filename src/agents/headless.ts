@@ -108,9 +108,10 @@ export const HEADLESS_ENV_ALLOWLIST: readonly string[] = [
   'SSL_CERT_DIR',
   'REQUESTS_CA_BUNDLE',
   'KIT_HEADLESS',
+  'DEN_PROFILE',
 ]
 
-export const HEADLESS_ENV_PREFIXES: readonly string[] = ['LC_', 'XDG_', 'NVM_', 'DEN_']
+export const HEADLESS_ENV_PREFIXES: readonly string[] = ['LC_', 'XDG_', 'NVM_']
 
 export const HEADLESS_AGENT_ENV_PREFIXES: Record<HeadlessAgent, readonly string[]> = {
   claude: ['ANTHROPIC_', 'CLAUDE_'],

@@ -5,7 +5,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { writeJsonFile } from '../src/agents/files.ts'
 import { agentHomes, installClaudePlugin } from '../src/agents/index.ts'
-import { headlessEnv, HEADLESS_ENV_PREFIXES } from '../src/agents/headless.ts'
+import { headlessEnv, HEADLESS_ENV_ALLOWLIST, HEADLESS_ENV_PREFIXES } from '../src/agents/headless.ts'
 import { writeFileAtomic } from '../src/atomic.ts'
 import { fileStore } from '../src/credentials.ts'
 import { platformContext } from '../src/platform.ts'
@@ -67,10 +67,12 @@ test('KIT_ANTIGRAVITY_HOME moves the antigravity home and overrides still win', 
   assert.equal(agentHomes(platformContext({ platform: 'linux', home: '/h', env: {} })).antigravity, '/h/.gemini/config')
 })
 
-test('headless children keep DEN_ variables', () => {
-  assert.ok(HEADLESS_ENV_PREFIXES.includes('DEN_'))
-  const env = headlessEnv('claude', { PATH: '/bin', DEN_PROFILE: 'work', BITA_WRAPPER_ID: 'x' })
+test('headless children keep DEN_PROFILE and nothing else from DEN_', () => {
+  assert.ok(!HEADLESS_ENV_PREFIXES.includes('DEN_'))
+  assert.ok(HEADLESS_ENV_ALLOWLIST.includes('DEN_PROFILE'))
+  const env = headlessEnv('claude', { PATH: '/bin', DEN_PROFILE: 'work', DEN_TOKEN: 'secret', BITA_WRAPPER_ID: 'x' })
   assert.equal(env['DEN_PROFILE'], 'work')
+  assert.equal(env['DEN_TOKEN'], undefined)
   assert.equal(env['BITA_WRAPPER_ID'], undefined)
 })
 
@@ -89,4 +91,24 @@ if (process.argv[2] === 'plugin' && process.argv[3] === 'marketplace' && process
   const calls = (await readFile(log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { argv: string[]; dir: string | null })
   assert.ok(calls.length >= 3)
   assert.ok(calls.every((call) => call.dir === path.join(home, 'profile')))
+})
+
+test('the default exec works with a partial ctx.env that has no PATH', { skip: posixOnly }, async (t) => {
+  const home = await tempDir(t)
+  const log = path.join(home, 'calls.log')
+  const bin = await fakeTool(home, 'claude', `#!${process.execPath}
+const fs = (await import('node:fs')).default
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ dir: process.env.CLAUDE_CONFIG_DIR ?? null, home: process.env.HOME ?? null, path: process.env.PATH ?? '' }) + '\\n')
+if (process.argv[2] === 'plugin' && process.argv.includes('list')) process.stdout.write('[]')
+`)
+  const ctx = platformContext({ home, env: { CLAUDE_CONFIG_DIR: path.join(home, 'profile') } })
+  const steps = await installClaudePlugin({ marketplace: 'owner/repo', marketplaceName: 'demo', plugin: 'demo' }, { ctx, locate: async () => bin })
+  assert.ok(steps.every((step) => step.state !== 'failed'), JSON.stringify(steps))
+  const calls = (await readFile(log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { dir: string | null; home: string | null; path: string })
+  assert.ok(calls.length >= 3)
+  for (const call of calls) {
+    assert.equal(call.dir, path.join(home, 'profile'))
+    assert.equal(call.home, null)
+    assert.ok(call.path.split(path.delimiter).includes(path.dirname(process.execPath)))
+  }
 })
