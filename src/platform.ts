@@ -57,6 +57,10 @@ export function toolDirs(tool: string, ctx: PlatformContext = platformContext())
   }
 }
 
+export function kitConfigRoot(ctx: PlatformContext = platformContext()): string {
+  return ctx.env['KIT_CONFIG_DIR'] || pathApi(ctx).join(configHome(ctx), 'kikedealba')
+}
+
 export function pathDelimiter(ctx: PlatformContext = platformContext()): string {
   return ctx.platform === 'win32' ? ';' : ':'
 }
